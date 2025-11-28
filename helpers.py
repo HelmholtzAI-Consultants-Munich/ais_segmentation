@@ -1,0 +1,216 @@
+import os
+from os.path import basename
+
+import cc3d
+import networkx as nx
+import nibabel as nib
+import numpy as np
+import tiffile
+from PIL import Image
+from skan import Skeleton, summarize
+
+Image.MAX_IMAGE_PIXELS = 281309436 * 12
+
+files = os.listdir(".")
+
+slide = 2000
+patch_size = 256
+pad = patch_size // 2
+
+
+def build_skeleton_graph(skeleton_summary):
+    # skeleton_summary = skeleton_summary[skeleton_summary["branch_type"].isin([0, 1, 2])]
+    return nx.from_pandas_edgelist(
+        skeleton_summary, "node_id_src", "node_id_dst", edge_attr="branch_distance"
+    )
+
+
+def get_skeleton_lengths(skeleton, spacing):
+    skeleton = Skeleton(skeleton, spacing=spacing)
+    skeleton_summary = summarize(skeleton, separator="_")
+    return skeleton_summary.groupby("skeleton_id")[
+        ["node_id_src", "node_id_dst", "branch_type", "branch_distance"]
+    ].apply(
+        lambda rows: nx.diameter(build_skeleton_graph(rows), weight="branch_distance")
+    )
+
+
+def remove_bordering_axons(volume, precomputed_ccl=False):
+    print("Border removal - computing ccl")
+    if not precomputed_ccl:
+        volume = cc3d.connected_components(volume, connectivity=26)
+    else:
+        volume = volume
+
+    # Efficiently gather border labels using ravel (no unnecessary copies)
+    border_labels = np.unique(
+        np.concatenate(
+            [
+                volume[0, :, :].ravel(),
+                volume[-1, :, :].ravel(),
+                volume[:, 0, :].ravel(),
+                volume[:, -1, :].ravel(),
+                volume[:, :, 0].ravel(),
+                volume[:, :, -1].ravel(),
+            ]
+        )
+    )
+
+    # Create mask of where labels should be removed
+    mask = np.isin(volume, border_labels)
+
+    # Set those to zero (or preserve binary structure)
+    return np.where(mask, 0, volume)
+
+
+def postprocess_instance(volume):
+    # the smallest real example we have seen so far is around 2000 voxels big
+    labels_out = cc3d.connected_components(volume, binary_image=True, connectivity=26)
+    print("Number of labels before dusting:", np.amax(labels_out))
+    labels_out = cc3d.dust(
+        labels_out, precomputed_ccl=True, in_place=True, threshold=1500
+    )
+    print("Number of labels before border removal:", np.amax(labels_out))
+    # labels_out = remove_bordering_axons(labels_out, precomputed_ccl=True)
+    # print("Number of labels after border removal:", len(np.unique(labels_out))-1)
+    return labels_out
+
+
+def extract_value(line):
+    line = line.split("=")[-1]
+    return float(line)
+
+
+def find_scaling(info):
+    if info is None:
+        return {"y": 1.0, "x": 1.0, "z": 1.0}
+    info = info.split("\n")
+    info = filter(lambda x: "AcquisitionBlock|AcquisitionModeSetup|Scaling" in x, info)
+    info = list(info)
+    scaling_y, scaling_x, scaling_z = 1.0, 1.0, 1.0
+    for line in info:
+        if "ScalingX" in line:
+            scaling_x = extract_value(line)
+        elif "ScalingY" in line:
+            scaling_y = extract_value(line)
+        elif "ScalingZ" in line:
+            scaling_z = extract_value(line)
+    return {"y": scaling_y, "x": scaling_x, "z": scaling_z}
+
+
+def load_tif_volume(path):
+    volume = tiffile.imread(path)  # Reads entire stack
+    # volume = volume[:, ::-1, :]  # Mirror Y
+    info = None
+    with tiffile.TiffFile(path) as tif:
+        try:
+            info = tif.imagej_metadata["Info"]
+        except:
+            pass
+    return volume, info
+
+
+def save_tif_volume(volume, path, compression="packbits"):
+    if compression:
+        tiffile.imwrite(path, volume, compression=compression)
+    else:
+        tiffile.imwrite(path, volume)
+
+
+def tif_to_tif_slices(path, existing_files, spacing=[1, 1, 1]):
+    volume, info = load_tif_volume(path)
+    scaling = find_scaling(info)
+    orig_shape = volume.shape
+    print("original shape:", orig_shape)
+    if len(volume.shape) == 4:
+        volume = volume[:, 1]
+    print("Shape after removing channels:", volume.shape)
+    volume = np.flip(volume, axis=(1, 2))
+
+    z_dim, y_dim, x_dim = volume.shape
+
+    for y_idx, y in enumerate(range(0, y_dim, slide)):
+        for x_idx, x in enumerate(range(0, x_dim, slide)):
+            fname = basename(path.replace(".tif", f"_{x_idx}_{y_idx}_0000.tif"))
+            json_name = basename(path.replace(".tif", f"_{x_idx}_{y_idx}_0000.json"))
+            spacing_info = (
+                '{"spacing": ['
+                + str(spacing[0])
+                + ","
+                + str(spacing[1])
+                + ","
+                + str(spacing[2])
+                + "]}"
+            )
+            print("Processing slice", y, x)
+            if json_name in existing_files:
+                print("Slice ", y, x, "already exists in output folder. skipping.")
+                continue
+
+            x_start = x - pad
+            x_end = x + pad + slide
+            y_start = y - pad
+            y_end = y + pad + slide
+
+            x_start_array, y_start_array = max(x_start, 0), max(y_start, 0)
+            x_end_array, y_end_array = min(x_end, x_dim), min(y_end, y_dim)
+
+            crop = volume[:, y_start_array:y_end_array, x_start_array:x_end_array]
+
+            x_pad_start = max(x_start_array - x_start, 0)
+            y_pad_start = max(y_start_array - y_start, 0)
+
+            x_pad_end = min(x_end - x_end_array, pad)
+            y_pad_end = min(y_end - y_end_array, pad)
+
+            if y_pad_end + y_pad_start + x_pad_start + x_pad_end > 0:
+                crop = np.pad(
+                    crop,
+                    ((0, 0), (y_pad_start, y_pad_end), (x_pad_start, x_pad_end)),
+                    mode="constant",
+                )
+
+            print(
+                f"\tExtracted slice [:, {y_start_array}:{y_end_array}, {x_start_array}:{x_end_array}]"
+            )
+            print("\tAdditional padding:")
+            print(f"\t[:,{y_pad_start}:{y_pad_end}, {x_pad_start}:{x_pad_end}]")
+
+            yield (
+                crop,
+                fname,
+                json_name,
+                y_idx,
+                x_idx,
+                spacing_info,
+                orig_shape,
+                scaling,
+            )
+
+
+def tif_to_nii_slices(path, existing_files):
+    volume = load_tif_volume(path)
+    if len(volume.shape) == 4:
+        volume = volume[:, 1]
+    volume = volume.transpose([2, 1, 0])
+    # volume = volume[:, ::-1, :]
+    # volume = volume[::-1, :, :]
+    volume = np.flip(volume, axis=(0, 1))
+    volume = np.pad(volume, ((pad, pad), (pad, pad), (0, 0)), mode="constant")
+
+    x_dim, y_dim, z_dim = volume.shape
+
+    for y_idx, y in enumerate(range(pad, y_dim - pad, slide)):
+        for x_idx, x in enumerate(range(pad, x_dim - pad, slide)):
+            fname = basename(path.replace(".tif", f"_{x_idx}_{y_idx}_0000.nii.gz"))
+            print("Processing slice", y, x)
+            if fname in existing_files:
+                print("Slice ", y, x, "already exists in output folder. skipping.")
+                continue
+            y_end = min(y + slide + pad, y_dim)
+            x_end = min(x + slide + pad, x_dim)
+            # crop = volume[x:x_end, y:y_end, :]
+            crop = volume[x - pad : x_end, y - pad : y_end]
+
+            nifti_image = nib.Nifti1Image(crop, np.eye(4))
+            yield nifti_image, fname, y_idx, x_idx
