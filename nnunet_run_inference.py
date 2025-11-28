@@ -326,16 +326,20 @@ def main():
     parser.add_argument(
         "modes",
         nargs="*",
-        choices=["split", "predict", "assemble", "analyze"],
         help="Operation modes: split, predict, assemble, and/or analyze. If none specified, runs all modes in order.",
     )
 
     args = parser.parse_args()
+    
+    # Validate modes
+    valid_modes = ["split", "predict", "assemble", "analyze"]
+    if args.modes:
+        for mode in args.modes:
+            if mode not in valid_modes:
+                parser.error(f"argument modes: invalid choice: '{mode}' (choose from {', '.join(repr(m) for m in valid_modes)})")
 
     # If no modes specified, run all of them
-    modes_to_run = (
-        args.modes if args.modes else ["split", "predict", "assemble", "analyze"]
-    )
+    modes_to_run = args.modes if args.modes else valid_modes
 
     # Run the selected modes in order
     for mode in modes_to_run:

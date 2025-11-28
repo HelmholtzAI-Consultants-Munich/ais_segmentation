@@ -12,7 +12,7 @@ setup(
         "connected-components-3d",
         "networkx",
         "nibabel",
-        "numpy",
+        "numpy<2",
         "tifffile",
         "Pillow",
         "skan",
@@ -21,6 +21,7 @@ setup(
         "torch",
         "nnunetv2",
         "scikit-image",
+        "blosc2"
     ],
     entry_points={
         "console_scripts": [
