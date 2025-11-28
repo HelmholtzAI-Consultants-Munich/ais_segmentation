@@ -5,7 +5,7 @@ import cc3d
 import networkx as nx
 import nibabel as nib
 import numpy as np
-import tiffile
+import tifffile
 from PIL import Image
 from skan import Skeleton, summarize
 
@@ -99,10 +99,10 @@ def find_scaling(info):
 
 
 def load_tif_volume(path):
-    volume = tiffile.imread(path)  # Reads entire stack
+    volume = tifffile.imread(path)  # Reads entire stack
     # volume = volume[:, ::-1, :]  # Mirror Y
     info = None
-    with tiffile.TiffFile(path) as tif:
+    with tifffile.TiffFile(path) as tif:
         try:
             info = tif.imagej_metadata["Info"]
         except:
@@ -112,9 +112,9 @@ def load_tif_volume(path):
 
 def save_tif_volume(volume, path, compression="packbits"):
     if compression:
-        tiffile.imwrite(path, volume, compression=compression)
+        tifffile.imwrite(path, volume, compression=compression)
     else:
-        tiffile.imwrite(path, volume)
+        tifffile.imwrite(path, volume)
 
 
 def tif_to_tif_slices(path, existing_files, spacing=[1, 1, 1]):

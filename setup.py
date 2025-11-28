@@ -13,7 +13,7 @@ setup(
         "networkx",
         "nibabel",
         "numpy",
-        "tiffile",
+        "tifffile",
         "Pillow",
         "skan",
         "matplotlib",

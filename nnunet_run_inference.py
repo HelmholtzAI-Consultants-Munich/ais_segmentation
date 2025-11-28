@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 import seaborn as sns
-import tiffile
+import tifffile
 import torch
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from skimage.morphology import skeletonize
@@ -156,7 +156,7 @@ def merge_predictions():
         out = np.flip(out, axis=(1, 2))
         if len(info["shape"]) == 4:
             out_temp = np.tile(out[:, np.newaxis, ...], (1, info["shape"][1], 1, 1))
-            tiffile.imwrite(
+            tifffile.imwrite(
                 out_path.replace(".label_instances", ".label_raw"),
                 out_temp.astype(np.uint8),
                 compression="deflate",
@@ -165,7 +165,7 @@ def merge_predictions():
             )
             del out_temp
         else:
-            tiffile.imwrite(
+            tifffile.imwrite(
                 out_path.replace(".label_instances", ".label_raw"),
                 out.astype(np.uint8),
                 compression="deflate",
@@ -180,11 +180,11 @@ def merge_predictions():
         if len(info["shape"]) == 4:
             out = np.tile(out[:, np.newaxis, ...], (1, info["shape"][1], 1, 1))
         out = out.astype(np.uint16)
-        tiffile.imwrite(
+        tifffile.imwrite(
             out_path, out, compression="deflate", dtype=out.dtype, imagej=True
         )
         out = (out > 0).astype(np.uint8)
-        tiffile.imwrite(
+        tifffile.imwrite(
             out_path.replace(".label_instances", ".label_binary"),
             out,
             compression="deflate",
