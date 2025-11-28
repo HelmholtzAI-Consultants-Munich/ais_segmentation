@@ -30,14 +30,14 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 model_folder = os.path.join(SCRIPT_DIR, "model_november_25")
 
 # Define all directories relative to script location
-splitted_dir = os.path.join(SCRIPT_DIR, "splitted")
+split_dir = os.path.join(SCRIPT_DIR, "split")
 predicted_dir = os.path.join(SCRIPT_DIR, "predicted")
 assembled_dir = os.path.join(SCRIPT_DIR, "assembled")
 to_predict_dir = os.path.join(SCRIPT_DIR, "to_predict")
 lengths_file = os.path.join(SCRIPT_DIR, "lengths.json")
 
-if not os.path.exists(splitted_dir):
-    os.makedirs(splitted_dir)
+if not os.path.exists(split_dir):
+    os.makedirs(split_dir)
 if not os.path.exists(predicted_dir):
     os.makedirs(predicted_dir)
 if not os.path.exists(assembled_dir):
@@ -196,7 +196,7 @@ def merge_predictions():
 def prepare_splits(ftype="tif"):
     "Loads the tif files and splits them into .nii.gz files ready for prediction"
     files = os.listdir(to_predict_dir)
-    existing_files = set(os.listdir(splitted_dir))
+    existing_files = set(os.listdir(split_dir))
     for file in files:
         if not file.endswith(".tif"):
             continue
@@ -211,7 +211,7 @@ def prepare_splits(ftype="tif"):
                 os.path.join(to_predict_dir, file), existing_files
             ):
                 print("processing", file, "slice", y, x, "->", fname)
-                nib.save(nifti_slice, os.path.join(splitted_dir, fname))
+                nib.save(nifti_slice, os.path.join(split_dir, fname))
                 xmax = max(xmax, x)
                 ymax = max(ymax, y)
         elif "tif" in ftype:
@@ -226,8 +226,8 @@ def prepare_splits(ftype="tif"):
                 scaling,
             ) in tif_to_tif_slices(os.path.join(to_predict_dir, file), existing_files):
                 print("processing", file, "slice", y, x, "->", fname)
-                save_tif_volume(crop, os.path.join(splitted_dir, fname))
-                with open(os.path.join(splitted_dir, json_fname), "w") as jf:
+                save_tif_volume(crop, os.path.join(split_dir, fname))
+                with open(os.path.join(split_dir, json_fname), "w") as jf:
                     jf.write(json_content)
                 xmax = max(xmax, x)
                 ymax = max(ymax, y)
@@ -284,7 +284,7 @@ def predict_on_splits():
     num_gpus = torch.cuda.device_count()
     print("Running on", num_gpus, "gpus")
 
-    input_files = os.listdir(splitted_dir)
+    input_files = os.listdir(split_dir)
     unpredicted_files = []
     unpredicted_outputs = []
 
@@ -294,7 +294,7 @@ def predict_on_splits():
             continue
         if not file.endswith(".tif"):
             continue
-        unpredicted_files.append([os.path.join(splitted_dir, file)])
+        unpredicted_files.append([os.path.join(split_dir, file)])
         unpredicted_outputs.append(output_name)
 
     processes = []

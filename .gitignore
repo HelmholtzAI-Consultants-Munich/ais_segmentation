@@ -205,3 +205,22 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+# model files
+model*
+# Pipeline directories - ignore all contents except .gitkeep
+split/*
+!split/.gitkeep
+
+predicted/*
+!predicted/.gitkeep
+
+assembled/*
+!assembled/.gitkeep
+
+to_predict/*
+!to_predict/.gitkeep
+
+# Output files
+lengths.json

@@ -71,12 +71,12 @@ nnunet_run_inference predict assemble analyze
 **1. `split` - Data Preparation**
 - Reads `.tif` files from `to_predict/` directory
 - Splits large images into smaller patches with overlap for efficient processing
-- Saves patches to `splitted/` directory as `.tif` files with `_0000.tif` suffix
+- Saves patches to `split/` directory as `.tif` files with `_0000.tif` suffix
 - Creates metadata JSON files with information about patch positions, padding, and image properties
 - This step is necessary because nnUNet processes fixed-size patches
 
 **2. `predict` - Neural Network Inference**
-- Loads split patches from `splitted/` directory
+- Loads split patches from `split/` directory
 - Runs nnUNet deep learning model on each patch using available GPUs
 - Performs segmentation to identify axon initial segments
 - Saves predictions to `predicted/` directory as `.nii.gz` files
@@ -109,7 +109,7 @@ After running the pipeline, your project will have the following structure:
 ```
 ais_segmentation/
 ├── to_predict/          # Input: Place your .tif files here
-├── splitted/            # Temporary: Split patches
+├── split/               # Temporary: Split patches
 ├── predicted/           # Temporary: Raw predictions
 ├── assembled/           # Output: Reconstructed segmentations
 │   ├── *.label_binary.tif
