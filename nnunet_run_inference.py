@@ -101,11 +101,7 @@ def draw_charts():
             spacing_text = "Z: {:.2E} Y: {:.2E} X: {:.2E}".format(
                 spacing[0], spacing[1], spacing[2]
             )
-            plt.title(
-                r"Label\n Spacing [m]: {}\nN axons: {},\n$\mu$: {:.2E} $\sigma$: {:.2E}".format(
-                    spacing_text, len(lengths), np.mean(lengths), np.std(lengths)
-                )
-            )
+            plt.title("Label\n Spacing [m]: {}\nN axons: {},\n$\mu$: {:.2E} $\sigma$: {:.2E}".format(spacing_text, len(lengths), np.mean(lengths), np.std(lengths)))
             plt.xlabel("Length")
             plt.tight_layout()
             plt.gcf().set_dpi(300)
