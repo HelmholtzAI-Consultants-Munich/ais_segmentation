@@ -125,9 +125,9 @@ def merge_predictions():
     for file in to_merge:
         out_path = os.path.join(
             assembled_dir,
-            file.replace(
+            file.replace(".tif", ".label_instances.tif").replace(
                 ".tiff", ".label_instances.tif"
-            ).replace(".tif", ".label_instances.tif")
+            ),
         )
         if os.path.exists(out_path.replace("label_instances", "label_binary")):
             print("Skipping ", file, "as it's already assembled")
@@ -164,11 +164,11 @@ def merge_predictions():
         out = np.flip(out, axis=(1, 2))
         if len(info["shape"]) == 4:
             out_temp = out
-            if "transposed" in info and info["transposed"]:
-                out_temp = out_temp.transpose([1, 0, 2, 3])
             out_temp = np.tile(
                 out_temp[:, np.newaxis, ...], (1, info["shape"][1], 1, 1)
             )
+            if "transposed" in info and info["transposed"]:
+                out_temp = out_temp.transpose([1, 0, 2, 3])
             tifffile.imwrite(
                 out_path.replace(".label_instances", ".label_raw"),
                 out_temp.astype(np.uint8),
