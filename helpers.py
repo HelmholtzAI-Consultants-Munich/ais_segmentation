@@ -171,8 +171,9 @@ def tif_to_tif_slices(path, existing_files, spacing=[1, 1, 1]):
 
     for y_idx, y in enumerate(range(0, y_dim, slide)):
         for x_idx, x in enumerate(range(0, x_dim, slide)):
-            fname = basename(path.replace(".tif", f"_{x_idx}_{y_idx}_0000.tif"))
-            json_name = basename(path.replace(".tif", f"_{x_idx}_{y_idx}_0000.json"))
+            new_path = path.lower().replace(".tiff", ".tif")
+            fname = basename(new_path.replace(".tif", f"_{x_idx}_{y_idx}_0000.tif"))
+            json_name = basename(new_path.replace(".tif", f"_{x_idx}_{y_idx}_0000.json"))
             spacing_info = (
                 '{"spacing": ['
                 + str(spacing[0])
