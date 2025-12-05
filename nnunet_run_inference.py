@@ -61,7 +61,7 @@ def draw_charts():
             file_info = file.replace(".label_binary.tif", ".tif.json")
             file_info = file_info.replace(".label_raw.tif", ".tif.json")
 
-            if not os.path.exists(file_info):
+            if not os.path.exists(os.path.join(to_predict_dir, file_info)):
                 file_info = file_info.replace(".tif.json", ".tiff.json")
 
             print("Plotting chart for file", file)
