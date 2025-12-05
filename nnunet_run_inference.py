@@ -60,6 +60,10 @@ def draw_charts():
 
             file_info = file.replace(".label_binary.tif", ".tif.json")
             file_info = file_info.replace(".label_raw.tif", ".tif.json")
+
+            if not os.path.exists(file_info):
+                file_info = file_info.replace(".tif.json", ".tiff.json")
+
             print("Plotting chart for file", file)
             with open(os.path.join(to_predict_dir, file_info), "r") as finfo:
                 info = json.load(finfo)
@@ -81,6 +85,9 @@ def draw_charts():
             volume = remove_bordering_axons(volume)
             print("skeletonizing", flush=True)
             skeleton = skeletonize(volume)
+            if skeleton.sum() == 0:
+                print("Warning: Skeleton is empty for file", file)
+                continue
             print("Calculating lengths", flush=True)
             lengths = get_skeleton_lengths(skeleton, spacing)
             print("Lengths calculated", flush=True)
@@ -116,6 +123,7 @@ def draw_charts():
             plt.close()
         except Exception as e:
             print("Error while plotting", file, e)
+            raise e
 
 
 def merge_predictions():
