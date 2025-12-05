@@ -142,7 +142,7 @@ def merge_predictions():
 
         for y in range(info["ny"]):
             for x in range(info["nx"]):
-                patch = file.replace(".tif", "").replace(".tiff", "")
+                patch = file.replace(".tiff", "").replace(".tif", "")
                 patch = f"{patch}_{x}_{y}.nii.gz"
                 prediction = (
                     nib.load(os.path.join(predicted_dir, patch)).get_fdata() > 0
