@@ -64,6 +64,7 @@ def draw_charts():
             with open(os.path.join(to_predict_dir, file_info), "r") as finfo:
                 info = json.load(finfo)
             spacing = info["scaling"]
+            transposed = info.get("transposed", False)
             spacing = (spacing["z"], spacing["y"], spacing["x"])
             print("Retreived spacing:", spacing)
             in_file = os.path.join(assembled_dir, file)
@@ -71,6 +72,8 @@ def draw_charts():
             if os.path.exists(out_file):
                 continue
             volume, _ = load_tif_volume(in_file)
+            if transposed and len(volume.shape) == 4:
+                volume = volume.transpose([1, 0, 2, 3])
             if len(volume.shape) == 4:
                 volume = volume[:, -1, ...]
             print("Removing bordering axons", flush=True)
@@ -101,7 +104,11 @@ def draw_charts():
             spacing_text = "Z: {:.2E} Y: {:.2E} X: {:.2E}".format(
                 spacing[0], spacing[1], spacing[2]
             )
-            plt.title("Label\n Spacing [m]: {}\nN axons: {},\n$\mu$: {:.2E} $\sigma$: {:.2E}".format(spacing_text, len(lengths), np.mean(lengths), np.std(lengths)))
+            plt.title(
+                "Label\n Spacing [m]: {}\nN axons: {},\nμ: {:.2E} σ: {:.2E}".format(
+                    spacing_text, len(lengths), np.mean(lengths), np.std(lengths)
+                )
+            )
             plt.xlabel("Length")
             plt.tight_layout()
             plt.gcf().set_dpi(300)
@@ -112,10 +119,15 @@ def draw_charts():
 
 
 def merge_predictions():
-    to_merge = filter(lambda x: x.endswith(".tif"), os.listdir(to_predict_dir))
+    to_merge = filter(
+        lambda x: x.endswith(".tif") or x.endswith(".tiff"), os.listdir(to_predict_dir)
+    )
     for file in to_merge:
         out_path = os.path.join(
-            assembled_dir, file.replace(".tif", ".label_instances.tif")
+            assembled_dir,
+            file.replace(".tif", ".label_instances.tif").replace(
+                ".tiff", ".label_instances.tif"
+            ),
         )
         if os.path.exists(out_path.replace("label_instances", "label_binary")):
             print("Skipping ", file, "as it's already assembled")
@@ -130,7 +142,7 @@ def merge_predictions():
 
         for y in range(info["ny"]):
             for x in range(info["nx"]):
-                patch = file.replace(".tif", "")
+                patch = file.replace(".tif", "").replace(".tiff", "")
                 patch = f"{patch}_{x}_{y}.nii.gz"
                 prediction = (
                     nib.load(os.path.join(predicted_dir, patch)).get_fdata() > 0
@@ -151,7 +163,12 @@ def merge_predictions():
 
         out = np.flip(out, axis=(1, 2))
         if len(info["shape"]) == 4:
-            out_temp = np.tile(out[:, np.newaxis, ...], (1, info["shape"][1], 1, 1))
+            out_temp = out
+            if "transposed" in info and info["transposed"]:
+                out_temp = out_temp.transpose([1, 0, 2, 3])
+            out_temp = np.tile(
+                out_temp[:, np.newaxis, ...], (1, info["shape"][1], 1, 1)
+            )
             tifffile.imwrite(
                 out_path.replace(".label_instances", ".label_raw"),
                 out_temp.astype(np.uint8),
@@ -176,6 +193,10 @@ def merge_predictions():
         if len(info["shape"]) == 4:
             out = np.tile(out[:, np.newaxis, ...], (1, info["shape"][1], 1, 1))
         out = out.astype(np.uint16)
+
+        if "transposed" in info and info["transposed"]:
+            out = out.transpose([1, 0, 2, 3])
+
         tifffile.imwrite(
             out_path, out, compression="deflate", dtype=out.dtype, imagej=True
         )
@@ -194,7 +215,7 @@ def prepare_splits(ftype="tif"):
     files = os.listdir(to_predict_dir)
     existing_files = set(os.listdir(split_dir))
     for file in files:
-        if not file.endswith(".tif"):
+        if not file.endswith(".tif") and not file.endswith(".tiff"):
             continue
         print("Splitting", file)
         ymax = 0
@@ -220,6 +241,7 @@ def prepare_splits(ftype="tif"):
                 json_content,
                 shape,
                 scaling,
+                transposed,
             ) in tif_to_tif_slices(os.path.join(to_predict_dir, file), existing_files):
                 print("processing", file, "slice", y, x, "->", fname)
                 save_tif_volume(crop, os.path.join(split_dir, fname))
@@ -236,6 +258,7 @@ def prepare_splits(ftype="tif"):
                         "pad": pad,
                         "shape": shape,
                         "scaling": scaling,
+                        "transposed": transposed,
                     }
                     json.dump(file_info, inf)
 
@@ -285,10 +308,13 @@ def predict_on_splits():
     unpredicted_outputs = []
 
     for file in input_files:
-        output_name = os.path.join(predicted_dir, file.replace("_0000.tif", ".nii.gz"))
+        output_name = os.path.join(
+            predicted_dir,
+            file.replace("_0000.tif", ".nii.gz").replace("_0000.tiff", ".nii.gz"),
+        )
         if os.path.exists(output_name):
             continue
-        if not file.endswith(".tif"):
+        if not file.endswith(".tif") and not file.endswith(".tiff"):
             continue
         unpredicted_files.append([os.path.join(split_dir, file)])
         unpredicted_outputs.append(output_name)
@@ -326,13 +352,15 @@ def main():
     )
 
     args = parser.parse_args()
-    
+
     # Validate modes
     valid_modes = ["split", "predict", "assemble", "analyze"]
     if args.modes:
         for mode in args.modes:
             if mode not in valid_modes:
-                parser.error(f"argument modes: invalid choice: '{mode}' (choose from {', '.join(repr(m) for m in valid_modes)})")
+                parser.error(
+                    f"argument modes: invalid choice: '{mode}' (choose from {', '.join(repr(m) for m in valid_modes)})"
+                )
 
     # If no modes specified, run all of them
     modes_to_run = args.modes if args.modes else valid_modes

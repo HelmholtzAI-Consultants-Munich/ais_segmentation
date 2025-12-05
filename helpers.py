@@ -107,6 +107,16 @@ def load_tif_volume(path):
             info = tif.imagej_metadata["Info"]
         except:
             pass
+        if info is None:
+            try:
+                info = tif.ome_metadata["Info"]
+            except: 
+                pass       
+        if info is None:
+            try:
+                info = tif.ome_metadata
+            except: 
+                pass
     return volume, info
 
 
@@ -119,6 +129,36 @@ def save_tif_volume(volume, path, compression="packbits"):
 
 def tif_to_tif_slices(path, existing_files, spacing=[1, 1, 1]):
     volume, info = load_tif_volume(path)
+
+    shape = volume.shape
+
+    transposed = False 
+
+    if len(shape) == 4:
+        print("Input volume has 4 dimensions")
+        if shape[0] < shape[1]:
+            print("Dimension 0 is smaller than 1, assuming channels in dim 0 and transposing to ZCYX")
+            volume = volume.transpose([1, 0, 2, 3])
+            transposed = True
+
+    volume_max = volume.max()
+    if volume_max > 255:
+        print("Volume max > 255. Assuming 16-bit input, converting to 8-bit for nnUNet")
+        if len(shape) == 3:
+            volume = volume.astype(np.float16)
+            volume_min = volume.min()
+            scale = 256.0 / (volume_max - volume_min + 1)
+            volume = (volume - volume_min) * scale + 0.5
+            volume = np.clip(volume, 0, 255).astype(np.uint8)
+        elif len(shape) == 4:
+            volume = volume.astype(np.float16)
+            for c in range(volume.shape[1]):
+                channel_min = volume[:, c].min()
+                channel_max = volume[:, c].max()
+                scale = 256.0 / (channel_max - channel_min + 1)
+                volume[:, c] = (volume[:, c] - channel_min) * scale + 0.5
+            volume = np.clip(volume, 0, 255).astype(np.uint8)
+
     scaling = find_scaling(info)
     orig_shape = volume.shape
     print("original shape:", orig_shape)
@@ -185,6 +225,7 @@ def tif_to_tif_slices(path, existing_files, spacing=[1, 1, 1]):
                 spacing_info,
                 orig_shape,
                 scaling,
+                transposed
             )
 
 
