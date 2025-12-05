@@ -125,9 +125,9 @@ def merge_predictions():
     for file in to_merge:
         out_path = os.path.join(
             assembled_dir,
-            file.replace(".tif", ".label_instances.tif").replace(
+            file.replace(
                 ".tiff", ".label_instances.tif"
-            ),
+            ).replace(".tif", ".label_instances.tif")
         )
         if os.path.exists(out_path.replace("label_instances", "label_binary")):
             print("Skipping ", file, "as it's already assembled")
