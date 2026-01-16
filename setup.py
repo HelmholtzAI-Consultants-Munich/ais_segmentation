@@ -1,4 +1,7 @@
 from setuptools import setup, find_packages
+from pathlib import Path
+
+nnunet_path = Path(__file__).parent.parent / "nnUNet"
 
 setup(
     name="ais_segmentation",
@@ -19,9 +22,11 @@ setup(
         "matplotlib",
         "seaborn",
         "torch",
-        "nnunetv2",
+        f"nnunetv2 @ file://{nnunet_path.resolve()}",
         "scikit-image",
-        "blosc2"
+        "blosc2",
+        "zarr",
+        "dask"
     ],
     entry_points={
         "console_scripts": [

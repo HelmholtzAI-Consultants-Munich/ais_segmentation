@@ -5,6 +5,7 @@ import cc3d
 import networkx as nx
 import nibabel as nib
 import numpy as np
+import xml.etree.ElementTree as ET
 import tifffile
 from PIL import Image
 from skan import Skeleton, summarize
@@ -84,18 +85,42 @@ def extract_value(line):
 def find_scaling(info):
     if info is None:
         return {"y": 1.0, "x": 1.0, "z": 1.0}
-    info = info.split("\n")
-    info = filter(lambda x: "AcquisitionBlock|AcquisitionModeSetup|Scaling" in x, info)
-    info = list(info)
-    scaling_y, scaling_x, scaling_z = 1.0, 1.0, 1.0
-    for line in info:
-        if "ScalingX" in line:
-            scaling_x = extract_value(line)
-        elif "ScalingY" in line:
-            scaling_y = extract_value(line)
-        elif "ScalingZ" in line:
-            scaling_z = extract_value(line)
-    return {"y": scaling_y, "x": scaling_x, "z": scaling_z}
+
+    if "PhysicalSizeX" in info: # ome XML metadata
+        root = ET.fromstring(info)
+        # detect default namespace
+        ns = {'ome': root.tag.split('}')[0].strip('{')}
+
+        values = {
+            "PhysicalSizeX": 0,
+            "PhysicalSizeY": 0,
+            "PhysicalSizeZ": 0
+        }
+
+        for elem in root.iter():
+            for key in values:
+                if key in elem.attrib:
+                    values[key] = float(elem.attrib[key])
+
+        return {
+            "ScalingY": values["PhysicalSizeY"] * 1e-6, # values are in micrometers
+            "ScalingX": values["PhysicalSizeX"] * 1e-6,
+            "ScalingZ": values["PhysicalSizeZ"] * 1e-6,
+        }
+
+    elif "AcquisitionBlock" in info:  # ImageJ metadata
+        info = info.split("\n")
+        info = filter(lambda x: "AcquisitionBlock|AcquisitionModeSetup|Scaling" in x, info)
+        info = list(info)
+        scaling_y, scaling_x, scaling_z = 1.0, 1.0, 1.0
+        for line in info:
+            if "ScalingX" in line:
+                scaling_x = extract_value(line)
+            elif "ScalingY" in line:
+                scaling_y = extract_value(line)
+            elif "ScalingZ" in line:
+                scaling_z = extract_value(line)
+        return {"y": scaling_y, "x": scaling_x, "z": scaling_z}
 
 
 def load_tif_volume(path):
