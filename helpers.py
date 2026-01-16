@@ -26,6 +26,66 @@ def build_skeleton_graph(skeleton_summary):
     )
 
 
+def get_skeleton_summaries(skeleton_inst, original_file_dask, spacing):
+    skeleton = Skeleton(skeleton_inst > 0, spacing=spacing, keep_images=False)
+    stats = summarize(skeleton, separator="_")
+
+    path_lengths = np.asarray(skeleton.path_lengths(), dtype=np.float32)
+
+    out = {}
+    entries = []
+    flats = []
+
+    for skel_id, rows in stats.groupby("skeleton_id", sort=False):
+        path_ids = rows.index.to_numpy(dtype=int)
+
+        if path_ids.size == 0:
+            continue
+
+        best_pid = int(path_ids[np.argmax(path_lengths[path_ids])])
+        length = float(path_lengths[best_pid])
+
+        coords = skeleton.path_coordinates(best_pid)
+
+        if coords.size == 0:
+            continue
+
+        vox = np.rint(coords).astype(np.int64)
+        c0 = tuple(vox[0])
+        inst_id = int(skeleton_inst[c0])
+
+        if inst_id == 0:
+            print("Warning: skeleton_id", skel_id, "has best path starting at background voxel", c0)
+            continue
+
+        idx = tuple(vox.T)
+        flat = np.ravel_multi_index(idx, dims=original_file_dask.shape, mode="clip").astype(np.int64)
+
+        entries.append((inst_id, length, flat.size))
+        flats.append(flat)
+
+    if len(flats) == 0:
+        return out
+
+    flat = np.concatenate(flats, axis=0)
+    profile = original_file_dask.ravel()[flat].compute().astype(float)
+
+    pos = 0
+    for inst_id, length, n in entries:
+        prof = profile[pos:pos + n].tolist()
+        pos += n
+
+        if inst_id in out:
+            prev_len = out[inst_id]["length"]
+            if length > prev_len:
+                out[inst_id] = {"length": length, "profile": prof}
+        else:
+            out[inst_id] = {"length": length, "profile": prof}
+
+    return out
+
+
+
 def get_skeleton_lengths(skeleton, spacing):
     skeleton = Skeleton(skeleton, spacing=spacing)
     skeleton_summary = summarize(skeleton, separator="_")
@@ -103,9 +163,9 @@ def find_scaling(info):
                     values[key] = float(elem.attrib[key])
 
         return {
-            "ScalingY": values["PhysicalSizeY"] * 1e-6, # values are in micrometers
-            "ScalingX": values["PhysicalSizeX"] * 1e-6,
-            "ScalingZ": values["PhysicalSizeZ"] * 1e-6,
+            "y": values["PhysicalSizeY"] * 1e-6, # values are in micrometers
+            "x": values["PhysicalSizeX"] * 1e-6,
+            "z": values["PhysicalSizeZ"] * 1e-6,
         }
 
     elif "AcquisitionBlock" in info:  # ImageJ metadata

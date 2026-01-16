@@ -18,6 +18,7 @@ from skimage.morphology import skeletonize
 
 from helpers import (
     get_skeleton_lengths,
+    get_skeleton_summaries,
     load_tif_volume,
     pad,
     postprocess_instance,
@@ -29,80 +30,101 @@ from helpers import (
     find_scaling
 )
 
-# Get the directory where this script is located
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-model_folder = os.path.join(SCRIPT_DIR, "model_november_25")
 
-# Define all directories relative to script location
-split_dir = os.path.join(SCRIPT_DIR, "split")
-predicted_dir = os.path.join(SCRIPT_DIR, "predicted")
-assembled_dir = os.path.join(SCRIPT_DIR, "assembled")
-to_predict_dir = os.path.join(SCRIPT_DIR, "to_predict")
-lengths_file = os.path.join(SCRIPT_DIR, "lengths.json")
+def draw_charts(to_predict_dir, assembled_dir):
+    to_draw = filter(
+        lambda x: re.match(r".*\.label\_instances\.tiff?$", x.lower()), os.listdir(assembled_dir)
+    )
 
-if not os.path.exists(split_dir):
-    os.makedirs(split_dir)
-if not os.path.exists(predicted_dir):
-    os.makedirs(predicted_dir)
-if not os.path.exists(assembled_dir):
-    os.makedirs(assembled_dir)
-if not os.path.exists(to_predict_dir):
-    os.makedirs(to_predict_dir)
+    for file in to_draw:
+        file_stub = re.sub(r"\.label\_instances\.tiff?$", "", file, flags=re.IGNORECASE)
 
+        info_files = list(filter(
+            lambda x: re.match(
+                rf"{re.escape(file_stub)}.*\.json$", x, flags=re.IGNORECASE
+            ),
+            os.listdir(to_predict_dir),
+        ))
 
-def draw_charts():
-    completed = os.listdir(assembled_dir)
-    for file in completed:
+        if len(info_files) == 0:
+            print("No info file found for", file)
+            continue
+            
+        
+        file_info = list(info_files)[0]
+        print("Found info file", file_info, "for", file)
+
+        source_file = re.sub(r".json$", "", file_info, flags=re.IGNORECASE)
+
+        sft = tifffile.TiffFile(os.path.join(to_predict_dir, source_file))
+        zarr_store = sft.aszarr()
+        z = zarr.open(zarr_store, mode="r")
+        dask_array = da.from_zarr(z)
+
         try:
-            # Skip hidden files, .gitkeep, and other system files
-            if file.startswith("."):
-                continue
-            if "label_instances" in file:
-                continue  # instances is same as binary in skeleton domain
-            if file.endswith(".png"):
-                continue
-
-            file_info = file.replace(".label_binary.tif", ".tif.json")
-            file_info = file_info.replace(".label_raw.tif", ".tif.json")
-
-            if not os.path.exists(os.path.join(to_predict_dir, file_info)):
-                file_info = file_info.replace(".tif.json", ".tiff.json")
-
             print("Plotting chart for file", file)
             with open(os.path.join(to_predict_dir, file_info), "r") as finfo:
                 info = json.load(finfo)
             spacing = info["scaling"]
             transposed = info.get("transposed", False)
+            print("-->", spacing)
             spacing = (spacing["z"], spacing["y"], spacing["x"])
+
+            if transposed: 
+                dask_array = dask_array.transpose([1, 0, 2, 3])
+            if len(dask_array.shape) == 4:
+                dask_array = dask_array[:, -1, ...]
+
             print("Retreived spacing:", spacing)
             in_file = os.path.join(assembled_dir, file)
             out_file = in_file + ".png"
+            out_meta_file = in_file + ".axons.json"
+
             if os.path.exists(out_file):
+                print("Skipping", file, "as it's already plotted")
                 continue
+
             volume, _ = load_tif_volume(in_file)
+
             if transposed and len(volume.shape) == 4:
                 volume = volume.transpose([1, 0, 2, 3])
             if len(volume.shape) == 4:
                 volume = volume[:, -1, ...]
+
             print("Removing bordering axons", flush=True)
             # volume = remove_bordering_axons(volume)
-            volume = remove_bordering_axons(volume)
+            volume = remove_bordering_axons(volume, precomputed_ccl=True)
+
+            print("Counting instance volumes", flush=True)
+            # count the instance volumes
+            unique, counts = np.unique(volume[volume > 0], return_counts=True)
+            instance_volumes = dict(zip(unique, counts))
+
             print("skeletonizing", flush=True)
             skeleton = skeletonize(volume)
+
+            volume[skeleton == 0] = 0 # only keep the entries of the skeleton
+
+            # volume = volume[skeleton > 0]
+
             if skeleton.sum() == 0:
                 print("Warning: Skeleton is empty for file", file)
                 continue
+
             print("Calculating lengths", flush=True)
-            lengths = get_skeleton_lengths(skeleton, spacing)
+            # lengths = get_skeleton_lengths(skeleton, spacing)
+            lengths_info = get_skeleton_summaries(volume, dask_array, spacing)
+            for instance in lengths_info.keys():
+                lengths_info[instance]["volume"] = int(instance_volumes.get(int(instance), 0))
+
+            # convert keys to ints
+            lengths_info = {int(k): v for k, v in lengths_info.items()}
+
+            lengths = list(x["length"] for x in lengths_info.values())
             print("Lengths calculated", flush=True)
-            if os.path.exists(lengths_file):
-                with open(lengths_file, "r") as length_data:
-                    lengths_data = json.load(length_data)
-            else:
-                lengths_data = {}
-            lengths_data[file] = list(lengths)
-            with open(lengths_file, "w") as length_data:
-                json.dump(lengths_data, length_data)
+
+            with open(out_meta_file, "w") as length_data:
+                json.dump(lengths_info, length_data, indent=2)
 
             kde = sns.kdeplot(lengths, label="KDE", color="C0")
             plt.xlabel("Length")
@@ -146,16 +168,14 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
         with open(os.path.join(to_predict_dir, file_info), "r") as finfo:
             info = json.load(finfo)
         if len(info["shape"]) == 4:
-            out = np.zeros((info["shape"][0], info["shape"][2], info["shape"][3]), bool)
+            first_axis = info["shape"][0] if not info.get("transposed", False) else info["shape"][1]
+            out = np.zeros((first_axis, info["shape"][2], info["shape"][3]), bool)
         else:
             out = np.zeros(info["shape"], bool)
 
-        if "transposed" in info and info["transposed"]:
-            out = out.transpose([1, 0, 2, 3])
-
         for y in range(info["ny"]):
             for x in range(info["nx"]):
-                patch = file + ".part_{x}_{y}_0000.tif"
+                patch = file + f".part_{x}_{y}_0000.nii.gz"
                 # patch = re.sub(r"\.tiff?$", "", file, flags=re.IGNORECASE)
                 # patch = f"{patch}_{x}_{y}.nii.gz"
                 prediction = (
@@ -178,8 +198,11 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
         out = np.flip(out, axis=(1, 2))
         if len(info["shape"]) == 4:
             out_temp = out
+            tile_cnt = info["shape"][1]
+            if "transposed" in info and info["transposed"]:
+                tile_cnt = info["shape"][0]
             out_temp = np.tile(
-                out_temp[:, np.newaxis, ...], (1, info["shape"][1], 1, 1)
+                out_temp[:, np.newaxis, ...], (1, tile_cnt, 1, 1)
             )
             if "transposed" in info and info["transposed"]:
                 out_temp = out_temp.transpose([1, 0, 2, 3])
@@ -205,7 +228,10 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
 
         # accomodate for additional channels if the input has them
         if len(info["shape"]) == 4:
-            out = np.tile(out[:, np.newaxis, ...], (1, info["shape"][1], 1, 1))
+            tile_cnt = info["shape"][1]
+            if "transposed" in info and info["transposed"]:
+                tile_cnt = info["shape"][0]
+            out = np.tile(out[:, np.newaxis, ...], (1, tile_cnt, 1, 1))
         out = out.astype(np.uint16)
 
         if "transposed" in info and info["transposed"]:
@@ -441,12 +467,14 @@ def main():
     parser.add_argument(
         "--source",
         type=str,
+        required=True,
         help="Directory with input files to predict on.",
     )
 
     parser.add_argument(
         "--model",
         type=str,
+        required=True,
         help="Directory with nnUNet model.",
     )
 
@@ -506,7 +534,7 @@ def main():
             print("Merging took", took / 60, "minutes")
         elif mode == "analyze":
             print("Drawing charts")
-            draw_charts()
+            draw_charts(args.source, os.path.join(args.results, "assembled"))
 
 
 if __name__ == "__main__":

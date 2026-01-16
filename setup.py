@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 from pathlib import Path
 
-nnunet_path = Path(__file__).parent.parent / "nnUNet"
+nnunet_path = Path(__file__).parent / "nnUNet"
 
 setup(
     name="ais_segmentation",
@@ -21,10 +21,9 @@ setup(
         "skan",
         "matplotlib",
         "seaborn",
-        "torch",
+        "torch==2.0.1",
         f"nnunetv2 @ file://{nnunet_path.resolve()}",
         "scikit-image",
-        "blosc2",
         "zarr",
         "dask"
     ],
