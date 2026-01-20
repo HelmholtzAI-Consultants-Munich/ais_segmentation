@@ -14,16 +14,10 @@ setup(
     install_requires=[
         "connected-components-3d",
         "networkx",
-        "nibabel",
-        "numpy<2",
-        "tifffile",
         "Pillow",
         "skan",
-        "matplotlib",
-        "seaborn",
         "torch==2.0.1",
         f"nnunetv2 @ file://{nnunet_path.resolve()}",
-        "scikit-image",
         "zarr",
         "dask"
     ],
