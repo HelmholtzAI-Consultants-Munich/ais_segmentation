@@ -2,22 +2,22 @@ import argparse
 import json
 import multiprocessing
 import os
-import zarr
-import time
 import re
+import time
 
+import dask.array as da
 import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 import seaborn as sns
 import tifffile
-import dask.array as da
 import torch
+import zarr
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from skimage.morphology import skeletonize
 
 from helpers import (
-    get_skeleton_lengths,
+    find_scaling,
     get_skeleton_summaries,
     load_tif_volume,
     pad,
@@ -25,32 +25,31 @@ from helpers import (
     remove_bordering_axons,
     save_tif_volume,
     slide,
-    tif_to_nii_slices,
-    tif_to_tif_slices,
-    find_scaling
 )
 
 
 def draw_charts(to_predict_dir, assembled_dir):
     to_draw = filter(
-        lambda x: re.match(r".*\.label\_instances\.tiff?$", x.lower()), os.listdir(assembled_dir)
+        lambda x: re.match(r".*\.label\_instances\.tiff?$", x.lower()),
+        os.listdir(assembled_dir),
     )
 
     for file in to_draw:
         file_stub = re.sub(r"\.label\_instances\.tiff?$", "", file, flags=re.IGNORECASE)
 
-        info_files = list(filter(
-            lambda x: re.match(
-                rf"{re.escape(file_stub)}.*\.json$", x, flags=re.IGNORECASE
-            ),
-            os.listdir(to_predict_dir),
-        ))
+        info_files = list(
+            filter(
+                lambda x: re.match(
+                    rf"{re.escape(file_stub)}.*\.json$", x, flags=re.IGNORECASE
+                ),
+                os.listdir(to_predict_dir),
+            )
+        )
 
         if len(info_files) == 0:
             print("No info file found for", file)
             continue
-            
-        
+
         file_info = list(info_files)[0]
         print("Found info file", file_info, "for", file)
 
@@ -70,7 +69,7 @@ def draw_charts(to_predict_dir, assembled_dir):
             print("-->", spacing)
             spacing = (spacing["z"], spacing["y"], spacing["x"])
 
-            if transposed: 
+            if transposed:
                 dask_array = dask_array.transpose([1, 0, 2, 3])
             if len(dask_array.shape) == 4:
                 dask_array = dask_array[:, -1, ...]
@@ -103,7 +102,7 @@ def draw_charts(to_predict_dir, assembled_dir):
             print("skeletonizing", flush=True)
             skeleton = skeletonize(volume)
 
-            volume[skeleton == 0] = 0 # only keep the entries of the skeleton
+            volume[skeleton == 0] = 0  # only keep the entries of the skeleton
 
             # volume = volume[skeleton > 0]
 
@@ -115,7 +114,9 @@ def draw_charts(to_predict_dir, assembled_dir):
             # lengths = get_skeleton_lengths(skeleton, spacing)
             lengths_info = get_skeleton_summaries(volume, dask_array, spacing)
             for instance in lengths_info.keys():
-                lengths_info[instance]["volume"] = int(instance_volumes.get(int(instance), 0))
+                lengths_info[instance]["volume"] = int(
+                    instance_volumes.get(int(instance), 0)
+                )
 
             # convert keys to ints
             lengths_info = {int(k): v for k, v in lengths_info.items()}
@@ -168,7 +169,11 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
         with open(os.path.join(to_predict_dir, file_info), "r") as finfo:
             info = json.load(finfo)
         if len(info["shape"]) == 4:
-            first_axis = info["shape"][0] if not info.get("transposed", False) else info["shape"][1]
+            first_axis = (
+                info["shape"][0]
+                if not info.get("transposed", False)
+                else info["shape"][1]
+            )
             out = np.zeros((first_axis, info["shape"][2], info["shape"][3]), bool)
         else:
             out = np.zeros(info["shape"], bool)
@@ -201,9 +206,7 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
             tile_cnt = info["shape"][1]
             if "transposed" in info and info["transposed"]:
                 tile_cnt = info["shape"][0]
-            out_temp = np.tile(
-                out_temp[:, np.newaxis, ...], (1, tile_cnt, 1, 1)
-            )
+            out_temp = np.tile(out_temp[:, np.newaxis, ...], (1, tile_cnt, 1, 1))
             if "transposed" in info and info["transposed"]:
                 out_temp = out_temp.transpose([1, 0, 2, 3])
             tifffile.imwrite(
@@ -260,7 +263,7 @@ def prepare_splits(to_predict_dir, split_files_dir):
             # process the tif file
             print("Splitting", file, "detected as TIFF file")
             ymax = 0
-            xmax = 0 
+            xmax = 0
 
             with tifffile.TiffFile(os.path.join(to_predict_dir, file)) as tif:
                 if tif.is_imagej:
@@ -290,10 +293,14 @@ def prepare_splits(to_predict_dir, split_files_dir):
                         )
                         dask_array = dask_array.transpose([1, 0, 2, 3])
                         transposed = True
-                    min_val, max_val = da.compute(dask_array[:, -1].min(), dask_array[:, -1].max())
+                    min_val, max_val = da.compute(
+                        dask_array[:, -1].min(), dask_array[:, -1].max()
+                    )
 
                 if max_val > 255:
-                    print("Volume max > 255. Assuming 16-bit input, converting to 8-bit for nnUNet")
+                    print(
+                        "Volume max > 255. Assuming 16-bit input, converting to 8-bit for nnUNet"
+                    )
 
                 print("Original shape:", dask_array.shape)
                 if len(z.shape) == 4:
@@ -306,7 +313,6 @@ def prepare_splits(to_predict_dir, split_files_dir):
 
                 for y_idx, y in enumerate(range(0, y_dim, slide)):
                     for x_idx, x in enumerate(range(0, x_dim, slide)):
-
                         new_path = file + f".part_{x_idx}_{y_idx}_0000.tif"
                         json_path = file + f".part_{x_idx}_{y_idx}_0000.json"
                         if new_path in existing_files:
@@ -324,7 +330,9 @@ def prepare_splits(to_predict_dir, split_files_dir):
                         x_start_array, y_start_array = max(x_start, 0), max(y_start, 0)
                         x_end_array, y_end_array = min(x_end, x_dim), min(y_end, y_dim)
 
-                        crop = dask_array[:, y_start_array:y_end_array, x_start_array:x_end_array].compute()
+                        crop = dask_array[
+                            :, y_start_array:y_end_array, x_start_array:x_end_array
+                        ].compute()
 
                         if max_val > 255:
                             scale = 256.0 / (max_val - min_val + 1)
@@ -336,12 +344,15 @@ def prepare_splits(to_predict_dir, split_files_dir):
 
                         x_pad_end = min(x_end - x_end_array, pad)
                         y_pad_end = min(y_end - y_end_array, pad)
-                                        
 
                         if y_pad_end + y_pad_start + x_pad_start + x_pad_end > 0:
                             crop = np.pad(
                                 crop,
-                                ((0, 0), (y_pad_start, y_pad_end), (x_pad_start, x_pad_end)),
+                                (
+                                    (0, 0),
+                                    (y_pad_start, y_pad_end),
+                                    (x_pad_start, x_pad_end),
+                                ),
                                 mode="constant",
                             )
 
@@ -349,31 +360,28 @@ def prepare_splits(to_predict_dir, split_files_dir):
                             f"\tExtracted slice [:, {y_start_array}:{y_end_array}, {x_start_array}:{x_end_array}]"
                         )
                         print("\tAdditional padding:")
-                        print(f"\t[:,{y_pad_start}:{y_pad_end}, {x_pad_start}:{x_pad_end}]")
+                        print(
+                            f"\t[:,{y_pad_start}:{y_pad_end}, {x_pad_start}:{x_pad_end}]"
+                        )
                         save_tif_volume(crop, os.path.join(split_files_dir, new_path))
 
                         with open(os.path.join(split_files_dir, json_path), "w") as inf:
                             inf.write('{"spacing": [1,1,1]}')
 
-
                 with open(os.path.join(to_predict_dir, file + ".json"), "w") as inf:
-
                     spacing = find_scaling(info)
 
                     file_info = {
-                        "nx": x_idx+1,
-                        "ny": y_idx+1,
+                        "nx": x_idx + 1,
+                        "ny": y_idx + 1,
                         "slide": slide,
                         "pad": pad,
                         "shape": shape,
-                        "scaling": {
-                            **spacing
-                        },
-                        "transposed": transposed
+                        "scaling": {**spacing},
+                        "transposed": transposed,
                     }
 
                     json.dump(file_info, inf)
-
 
 
 def run_prediction_on_gpu(gpu_id, input_files, output_files, model_folder, n_parts):
@@ -422,8 +430,7 @@ def predict_on_splits(split_dir, predicted_dir, model_dir):
 
     for file in input_files:
         output_name = os.path.join(
-            predicted_dir,
-            re.sub("_0000.tif(f)?$", "_0000.nii.gz", file)
+            predicted_dir, re.sub("_0000.tif(f)?$", "_0000.nii.gz", file)
         )
         if os.path.exists(output_name):
             continue
@@ -523,13 +530,21 @@ def main():
         elif mode == "predict":
             print("Running prediction")
             start = time.time()
-            predict_on_splits(os.path.join(args.results, "split"), os.path.join(args.results, "predicted"), args.model)
+            predict_on_splits(
+                os.path.join(args.results, "split"),
+                os.path.join(args.results, "predicted"),
+                args.model,
+            )
             took = time.time() - start
             print("Predicting took", took / 60, "minutes")
         elif mode == "assemble":
             print("Merging predictions")
             start = time.time()
-            merge_predictions(args.source, os.path.join(args.results, "predicted"), os.path.join(args.results, "assembled"))
+            merge_predictions(
+                args.source,
+                os.path.join(args.results, "predicted"),
+                os.path.join(args.results, "assembled"),
+            )
             took = time.time() - start
             print("Merging took", took / 60, "minutes")
         elif mode == "analyze":

@@ -1,11 +1,11 @@
 import os
+import xml.etree.ElementTree as ET
 from os.path import basename
 
 import cc3d
 import networkx as nx
 import nibabel as nib
 import numpy as np
-import xml.etree.ElementTree as ET
 import tifffile
 from PIL import Image
 from skan import Skeleton, summarize
@@ -55,11 +55,18 @@ def get_skeleton_summaries(skeleton_inst, original_file_dask, spacing):
         inst_id = int(skeleton_inst[c0])
 
         if inst_id == 0:
-            print("Warning: skeleton_id", skel_id, "has best path starting at background voxel", c0)
+            print(
+                "Warning: skeleton_id",
+                skel_id,
+                "has best path starting at background voxel",
+                c0,
+            )
             continue
 
         idx = tuple(vox.T)
-        flat = np.ravel_multi_index(idx, dims=original_file_dask.shape, mode="clip").astype(np.int64)
+        flat = np.ravel_multi_index(
+            idx, dims=original_file_dask.shape, mode="clip"
+        ).astype(np.int64)
 
         entries.append((inst_id, length, flat.size))
         flats.append(flat)
@@ -72,7 +79,7 @@ def get_skeleton_summaries(skeleton_inst, original_file_dask, spacing):
 
     pos = 0
     for inst_id, length, n in entries:
-        prof = profile[pos:pos + n].tolist()
+        prof = profile[pos : pos + n].tolist()
         pos += n
 
         if inst_id in out:
@@ -83,7 +90,6 @@ def get_skeleton_summaries(skeleton_inst, original_file_dask, spacing):
             out[inst_id] = {"length": length, "profile": prof}
 
     return out
-
 
 
 def get_skeleton_lengths(skeleton, spacing):
@@ -146,16 +152,12 @@ def find_scaling(info):
     if info is None:
         return {"y": 1.0, "x": 1.0, "z": 1.0}
 
-    if "PhysicalSizeX" in info: # ome XML metadata
+    if "PhysicalSizeX" in info:  # ome XML metadata
         root = ET.fromstring(info)
         # detect default namespace
-        ns = {'ome': root.tag.split('}')[0].strip('{')}
+        ns = {"ome": root.tag.split("}")[0].strip("{")}
 
-        values = {
-            "PhysicalSizeX": 0,
-            "PhysicalSizeY": 0,
-            "PhysicalSizeZ": 0
-        }
+        values = {"PhysicalSizeX": 0, "PhysicalSizeY": 0, "PhysicalSizeZ": 0}
 
         for elem in root.iter():
             for key in values:
@@ -163,14 +165,16 @@ def find_scaling(info):
                     values[key] = float(elem.attrib[key])
 
         return {
-            "y": values["PhysicalSizeY"] * 1e-6, # values are in micrometers
+            "y": values["PhysicalSizeY"] * 1e-6,  # values are in micrometers
             "x": values["PhysicalSizeX"] * 1e-6,
             "z": values["PhysicalSizeZ"] * 1e-6,
         }
 
     elif "AcquisitionBlock" in info:  # ImageJ metadata
         info = info.split("\n")
-        info = filter(lambda x: "AcquisitionBlock|AcquisitionModeSetup|Scaling" in x, info)
+        info = filter(
+            lambda x: "AcquisitionBlock|AcquisitionModeSetup|Scaling" in x, info
+        )
         info = list(info)
         scaling_y, scaling_x, scaling_z = 1.0, 1.0, 1.0
         for line in info:
@@ -195,12 +199,12 @@ def load_tif_volume(path):
         if info is None:
             try:
                 info = tif.ome_metadata["Info"]
-            except: 
-                pass       
+            except:
+                pass
         if info is None:
             try:
                 info = tif.ome_metadata
-            except: 
+            except:
                 pass
     return volume, info
 
@@ -217,12 +221,14 @@ def tif_to_tif_slices(path, existing_files, spacing=[1, 1, 1]):
 
     shape = volume.shape
 
-    transposed = False 
+    transposed = False
 
     if len(shape) == 4:
         print("Input volume has 4 dimensions")
         if shape[0] < shape[1]:
-            print("Dimension 0 is smaller than 1, assuming channels in dim 0 and transposing to ZCYX")
+            print(
+                "Dimension 0 is smaller than 1, assuming channels in dim 0 and transposing to ZCYX"
+            )
             volume = volume.transpose([1, 0, 2, 3])
             transposed = True
 
@@ -256,9 +262,15 @@ def tif_to_tif_slices(path, existing_files, spacing=[1, 1, 1]):
 
     for y_idx, y in enumerate(range(0, y_dim, slide)):
         for x_idx, x in enumerate(range(0, x_dim, slide)):
-            new_path = path.replace(".tiff", ".tif").replace(".TIFF", ".tif").replace(".TIF", ".tif")
+            new_path = (
+                path.replace(".tiff", ".tif")
+                .replace(".TIFF", ".tif")
+                .replace(".TIF", ".tif")
+            )
             fname = basename(new_path.replace(".tif", f"_{x_idx}_{y_idx}_0000.tif"))
-            json_name = basename(new_path.replace(".tif", f"_{x_idx}_{y_idx}_0000.json"))
+            json_name = basename(
+                new_path.replace(".tif", f"_{x_idx}_{y_idx}_0000.json")
+            )
             spacing_info = (
                 '{"spacing": ['
                 + str(spacing[0])
@@ -311,7 +323,7 @@ def tif_to_tif_slices(path, existing_files, spacing=[1, 1, 1]):
                 spacing_info,
                 orig_shape,
                 scaling,
-                transposed
+                transposed,
             )
 
 
