@@ -391,7 +391,7 @@ def run_prediction_on_gpu(gpu_id, input_files, output_files, model_folder, n_par
         tile_step_size=0.5,
         use_gaussian=True,
         use_mirroring=True,
-        perform_everything_on_device=True,
+        perform_everything_on_device=False,
         device=torch.device("cuda", gpu_id),
         verbose=False,
         allow_tqdm=True,
