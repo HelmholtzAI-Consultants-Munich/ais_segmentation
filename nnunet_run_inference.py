@@ -260,6 +260,32 @@ def prepare_splits(to_predict_dir, split_files_dir):
 
     for file in files:
         if file.lower().endswith(".tif") or file.lower().endswith(".tiff"):
+            # Check if summary JSON file exists
+            json_summary_path = os.path.join(to_predict_dir, file + ".json")
+            if os.path.exists(json_summary_path):
+                # Load the JSON to get expected split counts
+                with open(json_summary_path, "r") as inf:
+                    file_info = json.load(inf)
+                    expected_nx = file_info.get("nx")
+                    expected_ny = file_info.get("ny")
+                
+                # Check if all expected splits exist
+                if expected_nx is not None and expected_ny is not None:
+                    all_splits_exist = True
+                    for y_idx in range(expected_ny):
+                        for x_idx in range(expected_nx):
+                            split_file = file + f".part_{x_idx}_{y_idx}_0000.tif"
+                            split_json = file + f".part_{x_idx}_{y_idx}_0000.json"
+                            if split_file not in existing_files or split_json not in existing_files:
+                                all_splits_exist = False
+                                break
+                        if not all_splits_exist:
+                            break
+                    
+                    if all_splits_exist:
+                        print(f"Skipping {file} - all splits and JSON files already exist")
+                        continue
+            
             # process the tif file
             print("Splitting", file, "detected as TIFF file")
             ymax = 0
