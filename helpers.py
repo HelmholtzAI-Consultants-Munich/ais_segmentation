@@ -105,7 +105,7 @@ def get_skeleton_lengths(skeleton, spacing):
 def remove_bordering_axons(volume, precomputed_ccl=False):
     print("Border removal - computing ccl")
     if not precomputed_ccl:
-        volume = cc3d.connected_components(volume, connectivity=26)
+        volume = cc3d.connected_components(volume, connectivity=26, max_labels=0xFFFE, out_dtype=np.uint16)
     else:
         volume = volume
 
@@ -124,15 +124,15 @@ def remove_bordering_axons(volume, precomputed_ccl=False):
     )
 
     # Create mask of where labels should be removed
-    mask = np.isin(volume, border_labels)
+    mask = np.isin(volume, border_labels, kind="table")
 
     # Set those to zero (or preserve binary structure)
-    return np.where(mask, 0, volume)
-
+    volume[mask] = 0
+    return volume
 
 def postprocess_instance(volume):
     # the smallest real example we have seen so far is around 2000 voxels big
-    labels_out = cc3d.connected_components(volume, binary_image=True, connectivity=26)
+    labels_out = cc3d.connected_components(volume, binary_image=True, connectivity=26, max_labels=0xFFFE, out_dtype=np.uint16)
     print("Number of labels before dusting:", np.amax(labels_out))
     labels_out = cc3d.dust(
         labels_out, precomputed_ccl=True, in_place=True, threshold=1500
