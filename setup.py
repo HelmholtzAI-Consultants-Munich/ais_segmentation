@@ -19,7 +19,8 @@ setup(
         "torch==2.0.1",
         f"nnunetv2 @ file://{nnunet_path.resolve()}",
         "zarr",
-        "dask"
+        "dask",
+        "lxml"
     ],
     entry_points={
         "console_scripts": [

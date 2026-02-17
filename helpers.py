@@ -185,6 +185,11 @@ def find_scaling(info):
             elif "ScalingZ" in line:
                 scaling_z = extract_value(line)
         return {"y": scaling_y, "x": scaling_x, "z": scaling_z}
+    
+    else:
+        print("WARNING! Unknown TIFF format for file. Assuming isotropic spacing of 1.0.")
+        return {"y": 1.0, "x": 1.0, "z": 1.0}
+
 
 
 def load_tif_volume(path):

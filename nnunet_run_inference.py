@@ -252,6 +252,16 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
             imagej=True,
         )
 
+def get_malformed_xml(tif):
+    try:
+        xml = tif.pages[0].tags['ImageDescription'].value
+        parser = etree.XMLParser(recover=True)   # recovers from some malformed constructs
+        root = etree.fromstring(xml.encode('utf-8'), parser=parser)
+        xml_fixed = etree.tostring(root, encoding='utf-8').decode('utf-8')
+        return xml_fixed
+    except Exception as e:
+        print("Error parsing XML:", e)
+        return ""
 
 def prepare_splits(to_predict_dir, split_files_dir):
     files = os.listdir(to_predict_dir)
@@ -299,6 +309,7 @@ def prepare_splits(to_predict_dir, split_files_dir):
                 else:
                     print("WARNING! Unknown TIFF format for file:", file)
                     print("Metadata WILL NOT be extracted correctly.")
+                    info = get_malformed_xml(tif)
 
                 zarr_store = tif.aszarr()
 
