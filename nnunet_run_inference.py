@@ -200,57 +200,94 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
                     x * info["slide"] : (x + 1) * info["slide"],
                 ] = prediction
 
+        print("All patches merged for file", file, "with shape", out.shape)
+
+        transposed = info.get("transposed", False)
+
         out = np.flip(out, axis=(1, 2))
+
         if len(info["shape"]) == 4:
-            out_temp = out
-            tile_cnt = info["shape"][1]
-            if "transposed" in info and info["transposed"]:
-                tile_cnt = info["shape"][0]
-            out_temp = np.tile(out_temp[:, np.newaxis, ...], (1, tile_cnt, 1, 1))
-            if "transposed" in info and info["transposed"]:
-                out_temp = out_temp.transpose([1, 0, 2, 3])
-            tifffile.imwrite(
-                out_path.replace(".label_instances", ".label_raw"),
-                out_temp.astype(np.uint8),
-                compression="deflate",
-                dtype=np.uint8,
-                imagej=True,
+            tile_cnt = info["shape"][0] if transposed else info["shape"][1]
+
+            # Create broadcasted view (NO copy)
+            out_b = np.broadcast_to(
+                out[:, None, :, :],
+                (out.shape[0], tile_cnt, out.shape[1], out.shape[2]),
             )
-            del out_temp
+
+            if transposed:
+                out_b = out_b.transpose(1, 0, 2, 3)
+
+            tifffile.imwrite(
+                out_path.replace(".label_instances", ".label_raw"), out_b, compression="deflate", dtype=np.uint8, imagej=True
+            )        
+
+            del out_b  
         else:
             tifffile.imwrite(
-                out_path.replace(".label_instances", ".label_raw"),
-                out.astype(np.uint8),
-                compression="deflate",
-                dtype=np.uint8,
-                imagej=True,
+                out_path.replace(".label_instances", ".label_raw"), out, compression="deflate", dtype=np.uint8, imagej=True
             )
 
         print("Postprocessing instance (dusting and instance segmentation)")
         out = postprocess_instance(out)
 
-        # accomodate for additional channels if the input has them
+        if out.dtype != np.uint16 and out.dtype != np.uint8:
+            out = out.astype(np.uint16)
+
+
         if len(info["shape"]) == 4:
-            tile_cnt = info["shape"][1]
-            if "transposed" in info and info["transposed"]:
-                tile_cnt = info["shape"][0]
-            out = np.tile(out[:, np.newaxis, ...], (1, tile_cnt, 1, 1))
-        out = out.astype(np.uint16)
+            tile_cnt = info["shape"][0] if transposed else info["shape"][1]
 
-        if "transposed" in info and info["transposed"]:
-            out = out.transpose([1, 0, 2, 3])
+            # Create broadcasted view (NO copy)
+            out_b = np.broadcast_to(
+                out[:, None, :, :],
+                (out.shape[0], tile_cnt, out.shape[1], out.shape[2]),
+            )
 
-        tifffile.imwrite(
-            out_path, out, compression="deflate", dtype=out.dtype, imagej=True
-        )
-        out = (out > 0).astype(np.uint8)
-        tifffile.imwrite(
-            out_path.replace(".label_instances", ".label_binary"),
-            out,
-            compression="deflate",
-            dtype=np.uint8,
-            imagej=True,
-        )
+            if transposed:
+                out_b = out_b.transpose(1, 0, 2, 3)
+
+            tifffile.imwrite(
+                out_path, out_b, compression="deflate", dtype=out.dtype, imagej=True
+            )        
+
+            del out_b
+        else:
+            tifffile.imwrite(
+                out_path, out, compression="deflate", dtype=out.dtype, imagej=True
+            )
+
+        binary = np.empty_like(out, dtype=np.uint8)
+        np.greater(out, 0, out=binary)
+
+        if len(info["shape"]) == 4:
+            tile_cnt = info["shape"][0] if transposed else info["shape"][1]
+
+            # Create broadcasted view (NO copy)
+            out_b = np.broadcast_to(
+                binary[:, None, :, :],
+                (binary.shape[0], tile_cnt, binary.shape[1], binary.shape[2]),
+            )
+
+            if transposed:
+                out_b = out_b.transpose(1, 0, 2, 3)
+
+            tifffile.imwrite(
+                out_path.replace(".label_instances", ".label_binary"),
+                out_b,
+                compression="deflate",
+                dtype=np.uint8,
+                imagej=True,
+            )
+
+        else:
+            tifffile.imwrite(
+                out_path.replace(".label_instances", ".label_binary"),
+                binary,
+                compression="deflate",
+                dtype=np.uint8,
+                imagej=True,
+            )
 
 def get_malformed_xml(tif):
     try:

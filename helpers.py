@@ -132,15 +132,15 @@ def remove_bordering_axons(volume, precomputed_ccl=False):
 
 def postprocess_instance(volume):
     # the smallest real example we have seen so far is around 2000 voxels big
-    labels_out = cc3d.connected_components(volume, binary_image=True, connectivity=26, max_labels=0xFFFE, out_dtype=np.uint16)
-    print("Number of labels before dusting:", np.amax(labels_out))
-    labels_out = cc3d.dust(
-        labels_out, precomputed_ccl=True, in_place=True, threshold=1500
+    volume = cc3d.connected_components(volume, binary_image=True, connectivity=26, max_labels=0xFFFE, out_dtype=np.uint16)
+    print("Number of labels before dusting:", np.amax(volume))
+    volume = cc3d.dust(
+        volume, precomputed_ccl=True, in_place=True, threshold=1500
     )
-    print("Number of labels before border removal:", np.amax(labels_out))
-    # labels_out = remove_bordering_axons(labels_out, precomputed_ccl=True)
-    # print("Number of labels after border removal:", len(np.unique(labels_out))-1)
-    return labels_out
+    print("Number of labels before border removal:", np.amax(volume))
+    # volume = remove_bordering_axons(volume, precomputed_ccl=True)
+    # print("Number of labels after border removal:", len(np.unique(volume))-1)
+    return volume
 
 
 def extract_value(line):
