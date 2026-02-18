@@ -105,7 +105,9 @@ def get_skeleton_lengths(skeleton, spacing):
 def remove_bordering_axons(volume, precomputed_ccl=False):
     print("Border removal - computing ccl")
     if not precomputed_ccl:
-        volume = cc3d.connected_components(volume, connectivity=26, max_labels=0xFFFE, out_dtype=np.uint16)
+        volume = cc3d.connected_components(
+            volume, connectivity=26, max_labels=0xFFFE, out_dtype=np.uint16
+        )
     else:
         volume = volume
 
@@ -130,13 +132,18 @@ def remove_bordering_axons(volume, precomputed_ccl=False):
     volume[mask] = 0
     return volume
 
+
 def postprocess_instance(volume):
     # the smallest real example we have seen so far is around 2000 voxels big
-    volume = cc3d.connected_components(volume, binary_image=True, connectivity=26, max_labels=0xFFFE, out_dtype=np.uint16)
-    print("Number of labels before dusting:", np.amax(volume))
-    volume = cc3d.dust(
-        volume, precomputed_ccl=True, in_place=True, threshold=1500
+    volume = cc3d.connected_components(
+        volume,
+        binary_image=True,
+        connectivity=26,
+        max_labels=0xFFFE,
+        out_dtype=np.uint16,
     )
+    print("Number of labels before dusting:", np.amax(volume))
+    volume = cc3d.dust(volume, precomputed_ccl=True, in_place=True, threshold=1500)
     print("Number of labels before border removal:", np.amax(volume))
     # volume = remove_bordering_axons(volume, precomputed_ccl=True)
     # print("Number of labels after border removal:", len(np.unique(volume))-1)
@@ -185,11 +192,12 @@ def find_scaling(info):
             elif "ScalingZ" in line:
                 scaling_z = extract_value(line)
         return {"y": scaling_y, "x": scaling_x, "z": scaling_z}
-    
-    else:
-        print("WARNING! Unknown TIFF format for file. Assuming isotropic spacing of 1.0.")
-        return {"y": 1.0, "x": 1.0, "z": 1.0}
 
+    else:
+        print(
+            "WARNING! Unknown TIFF format for file. Assuming isotropic spacing of 1.0."
+        )
+        return {"y": 1.0, "x": 1.0, "z": 1.0}
 
 
 def load_tif_volume(path):

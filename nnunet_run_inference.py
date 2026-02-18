@@ -1,6 +1,7 @@
 import argparse
 import json
 import multiprocessing
+import concurrent.futures
 import os
 import re
 import time
@@ -153,6 +154,22 @@ def draw_charts(to_predict_dir, assembled_dir):
             raise e
 
 
+def load_prediction_to_volume(patch_path, out, info, y, x):
+    prediction = nib.load(patch_path).get_fdata() > 0
+    prediction[prediction > 0] = 0xFF
+    prediction = prediction.transpose([2, 1, 0])
+    # now Z Y X
+    prediction = prediction[:, info["pad"] : -info["pad"], info["pad"] : -info["pad"]]
+    print("loaded patch", patch_path, "with unpadded shape", prediction.shape)
+    print("Patch nonzero count", np.count_nonzero(prediction))
+    print("Patch mean value", np.mean(prediction))
+    out[
+        :,
+        y * info["slide"] : (y + 1) * info["slide"],
+        x * info["slide"] : (x + 1) * info["slide"],
+    ] = prediction
+
+
 def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
     to_merge = filter(
         lambda x: re.match(r".*\.tiff?$", x.lower()), os.listdir(to_predict_dir)
@@ -174,31 +191,23 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
                 if not info.get("transposed", False)
                 else info["shape"][1]
             )
-            out = np.zeros((first_axis, info["shape"][2], info["shape"][3]), bool)
+            out = np.zeros((first_axis, info["shape"][2], info["shape"][3]), np.uint8)
         else:
-            out = np.zeros(info["shape"], bool)
+            out = np.zeros(info["shape"], np.uint8)
 
-        for y in range(info["ny"]):
-            for x in range(info["nx"]):
-                patch = file + f".part_{x}_{y}_0000.nii.gz"
-                # patch = re.sub(r"\.tiff?$", "", file, flags=re.IGNORECASE)
-                # patch = f"{patch}_{x}_{y}.nii.gz"
-                prediction = (
-                    nib.load(os.path.join(predicted_dir, patch)).get_fdata() > 0
-                )
-                prediction = prediction.transpose([2, 1, 0])
-                # now Z Y X
-                prediction = prediction[
-                    :, info["pad"] : -info["pad"], info["pad"] : -info["pad"]
-                ]
-                print("loaded patch", patch, "with unpadded shape", prediction.shape)
-                print("Patch nonzero count", np.count_nonzero(prediction))
-                print("Patch mean value", np.mean(prediction))
-                out[
-                    :,
-                    y * info["slide"] : (y + 1) * info["slide"],
-                    x * info["slide"] : (x + 1) * info["slide"],
-                ] = prediction
+        def load_patch(args):
+            y, x = args
+            patch = file + f".part_{x}_{y}_0000.nii.gz"
+            load_prediction_to_volume(
+                os.path.join(predicted_dir, patch), out, info, y, x
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+            futures = []
+            for y in range(info["ny"]):
+                for x in range(info["nx"]):
+                    futures.append(executor.submit(load_patch, (y, x)))
+            concurrent.futures.wait(futures)
 
         print("All patches merged for file", file, "with shape", out.shape)
 
@@ -219,21 +228,32 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
                 out_b = out_b.transpose(1, 0, 2, 3)
 
             tifffile.imwrite(
-                out_path.replace(".label_instances", ".label_raw"), out_b, compression="deflate", dtype=np.uint8, imagej=True
-            )        
+                out_path.replace(".label_instances", ".label_raw"),
+                out_b,
+                compression="deflate",
+                dtype=np.uint8,
+                imagej=True,
+            )
 
-            del out_b  
+            del out_b
         else:
             tifffile.imwrite(
-                out_path.replace(".label_instances", ".label_raw"), out, compression="deflate", dtype=np.uint8, imagej=True
+                out_path.replace(".label_instances", ".label_raw"),
+                out,
+                compression="deflate",
+                dtype=np.uint8,
+                imagej=True,
             )
 
         print("Postprocessing instance (dusting and instance segmentation)")
         out = postprocess_instance(out)
 
         if out.dtype != np.uint16 and out.dtype != np.uint8:
+            print("Warning: Postprocessed dtype is", out.dtype)
+            print(
+                "This should not happen and will increase memory consumption. Please report this issue."
+            )
             out = out.astype(np.uint16)
-
 
         if len(info["shape"]) == 4:
             tile_cnt = info["shape"][0] if transposed else info["shape"][1]
@@ -249,7 +269,7 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
 
             tifffile.imwrite(
                 out_path, out_b, compression="deflate", dtype=out.dtype, imagej=True
-            )        
+            )
 
             del out_b
         else:
@@ -259,6 +279,8 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
 
         binary = np.empty_like(out, dtype=np.uint8)
         np.greater(out, 0, out=binary)
+        del out
+        binary[binary > 0] = 0xFF
 
         if len(info["shape"]) == 4:
             tile_cnt = info["shape"][0] if transposed else info["shape"][1]
@@ -289,16 +311,20 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
                 imagej=True,
             )
 
+
 def get_malformed_xml(tif):
     try:
-        xml = tif.pages[0].tags['ImageDescription'].value
-        parser = etree.XMLParser(recover=True)   # recovers from some malformed constructs
-        root = etree.fromstring(xml.encode('utf-8'), parser=parser)
-        xml_fixed = etree.tostring(root, encoding='utf-8').decode('utf-8')
+        xml = tif.pages[0].tags["ImageDescription"].value
+        parser = etree.XMLParser(
+            recover=True
+        )  # recovers from some malformed constructs
+        root = etree.fromstring(xml.encode("utf-8"), parser=parser)
+        xml_fixed = etree.tostring(root, encoding="utf-8").decode("utf-8")
         return xml_fixed
     except Exception as e:
         print("Error parsing XML:", e)
         return ""
+
 
 def prepare_splits(to_predict_dir, split_files_dir):
     files = os.listdir(to_predict_dir)
@@ -315,7 +341,7 @@ def prepare_splits(to_predict_dir, split_files_dir):
                     file_info = json.load(inf)
                     expected_nx = file_info.get("nx")
                     expected_ny = file_info.get("ny")
-                
+
                 # Check if all expected splits exist
                 if expected_nx is not None and expected_ny is not None:
                     all_splits_exist = True
@@ -323,16 +349,21 @@ def prepare_splits(to_predict_dir, split_files_dir):
                         for x_idx in range(expected_nx):
                             split_file = file + f".part_{x_idx}_{y_idx}_0000.tif"
                             split_json = file + f".part_{x_idx}_{y_idx}_0000.json"
-                            if split_file not in existing_files or split_json not in existing_files:
+                            if (
+                                split_file not in existing_files
+                                or split_json not in existing_files
+                            ):
                                 all_splits_exist = False
                                 break
                         if not all_splits_exist:
                             break
-                    
+
                     if all_splits_exist:
-                        print(f"Skipping {file} - all splits and JSON files already exist")
+                        print(
+                            f"Skipping {file} - all splits and JSON files already exist"
+                        )
                         continue
-            
+
             # process the tif file
             print("Splitting", file, "detected as TIFF file")
             ymax = 0
@@ -460,6 +491,9 @@ def prepare_splits(to_predict_dir, split_files_dir):
 
 def run_prediction_on_gpu(gpu_id, input_files, output_files, model_folder, n_parts):
     print(f"Starting prediction on GPU {gpu_id} with {len(input_files)} files")
+    if len(input_files) == 0:
+        print(f"No files to predict on GPU {gpu_id}, skipping")
+        return
 
     predictor = nnUNetPredictor(
         tile_step_size=0.5,
