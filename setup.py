@@ -20,7 +20,7 @@ setup(
         f"nnunetv2 @ file://{nnunet_path.resolve()}",
         "zarr",
         "dask",
-        "lxml"
+        "lxml",
     ],
     entry_points={
         "console_scripts": [

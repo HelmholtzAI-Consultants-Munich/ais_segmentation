@@ -26,6 +26,8 @@ from helpers import (
     remove_bordering_axons,
     save_tif_volume,
     slide,
+    counts_chunked_uint16,
+    cc_gather_stats,
 )
 
 
@@ -75,7 +77,7 @@ def draw_charts(to_predict_dir, assembled_dir):
             if len(dask_array.shape) == 4:
                 dask_array = dask_array[:, -1, ...]
 
-            print("Retreived spacing:", spacing)
+            print("Retrieved spacing:", spacing)
             in_file = os.path.join(assembled_dir, file)
             out_file = in_file + ".png"
             out_meta_file = in_file + ".axons.json"
@@ -91,42 +93,16 @@ def draw_charts(to_predict_dir, assembled_dir):
             if len(volume.shape) == 4:
                 volume = volume[:, -1, ...]
 
-            print("Removing bordering axons", flush=True)
-            # volume = remove_bordering_axons(volume)
-            volume = remove_bordering_axons(volume, precomputed_ccl=True)
-
-            print("Counting instance volumes", flush=True)
-            # count the instance volumes
-            unique, counts = np.unique(volume[volume > 0], return_counts=True)
-            instance_volumes = dict(zip(unique, counts))
-
-            print("skeletonizing", flush=True)
-            skeleton = skeletonize(volume)
-
-            volume[skeleton == 0] = 0  # only keep the entries of the skeleton
-
-            # volume = volume[skeleton > 0]
-
-            if skeleton.sum() == 0:
-                print("Warning: Skeleton is empty for file", file)
-                continue
-
-            print("Calculating lengths", flush=True)
-            # lengths = get_skeleton_lengths(skeleton, spacing)
-            lengths_info = get_skeleton_summaries(volume, dask_array, spacing)
-            for instance in lengths_info.keys():
-                lengths_info[instance]["volume"] = int(
-                    instance_volumes.get(int(instance), 0)
-                )
-
-            # convert keys to ints
-            lengths_info = {int(k): v for k, v in lengths_info.items()}
-
-            lengths = list(x["length"] for x in lengths_info.values())
-            print("Lengths calculated", flush=True)
+            print("Gathering stats...")
+            lengths_info = cc_gather_stats(
+                volume, dask_array, spacing
+            )  # precompute the stats for all axons in parallel with dask
+            print("Stats gathered")
 
             with open(out_meta_file, "w") as length_data:
                 json.dump(lengths_info, length_data, indent=2)
+
+            lengths = [info["length"] for info in lengths_info.values()]
 
             kde = sns.kdeplot(lengths, label="KDE", color="C0")
             plt.xlabel("Length")
@@ -202,7 +178,7 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
                 os.path.join(predicted_dir, patch), out, info, y, x
             )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=26) as executor:
             futures = []
             for y in range(info["ny"]):
                 for x in range(info["nx"]):
@@ -402,9 +378,19 @@ def prepare_splits(to_predict_dir, split_files_dir):
                         dask_array[:, -1].min(), dask_array[:, -1].max()
                     )
 
+                perc975 = max_val
                 if max_val > 255:
                     print(
-                        "Volume max > 255. Assuming 16-bit input, converting to 8-bit for nnUNet"
+                        "Volume max > 255. Assuming 16-bit input, converting to 8-bit for nnUNet (97.5 percentile will be used for scaling)"
+                    )
+                    perc975 = da.compute(da.percentile(dask_array, 97.5))
+                    print(
+                        "97.5 percentile value:",
+                        perc975,
+                        "min value:",
+                        min_val,
+                        "max value:",
+                        max_val,
                     )
 
                 print("Original shape:", dask_array.shape)
@@ -440,7 +426,8 @@ def prepare_splits(to_predict_dir, split_files_dir):
                         ].compute()
 
                         if max_val > 255:
-                            scale = 256.0 / (max_val - min_val + 1)
+                            # use 97.5 percentile for scaling to reduce the impact of outliers
+                            scale = 256.0 / (perc975 - min_val + 1)
                             crop = (crop - min_val) * scale + 0.5
                             crop = np.clip(crop, 0, 255).astype(np.uint8)
 
