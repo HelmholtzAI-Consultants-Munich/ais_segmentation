@@ -1,6 +1,7 @@
 import argparse
 import json
 import multiprocessing
+import concurrent.futures
 import os
 import re
 import time
@@ -25,6 +26,8 @@ from helpers import (
     remove_bordering_axons,
     save_tif_volume,
     slide,
+    counts_chunked_uint16,
+    cc_gather_stats,
 )
 
 
@@ -74,7 +77,7 @@ def draw_charts(to_predict_dir, assembled_dir):
             if len(dask_array.shape) == 4:
                 dask_array = dask_array[:, -1, ...]
 
-            print("Retreived spacing:", spacing)
+            print("Retrieved spacing:", spacing)
             in_file = os.path.join(assembled_dir, file)
             out_file = in_file + ".png"
             out_meta_file = in_file + ".axons.json"
@@ -90,42 +93,16 @@ def draw_charts(to_predict_dir, assembled_dir):
             if len(volume.shape) == 4:
                 volume = volume[:, -1, ...]
 
-            print("Removing bordering axons", flush=True)
-            # volume = remove_bordering_axons(volume)
-            volume = remove_bordering_axons(volume, precomputed_ccl=True)
-
-            print("Counting instance volumes", flush=True)
-            # count the instance volumes
-            unique, counts = np.unique(volume[volume > 0], return_counts=True)
-            instance_volumes = dict(zip(unique, counts))
-
-            print("skeletonizing", flush=True)
-            skeleton = skeletonize(volume)
-
-            volume[skeleton == 0] = 0  # only keep the entries of the skeleton
-
-            # volume = volume[skeleton > 0]
-
-            if skeleton.sum() == 0:
-                print("Warning: Skeleton is empty for file", file)
-                continue
-
-            print("Calculating lengths", flush=True)
-            # lengths = get_skeleton_lengths(skeleton, spacing)
-            lengths_info = get_skeleton_summaries(volume, dask_array, spacing)
-            for instance in lengths_info.keys():
-                lengths_info[instance]["volume"] = int(
-                    instance_volumes.get(int(instance), 0)
-                )
-
-            # convert keys to ints
-            lengths_info = {int(k): v for k, v in lengths_info.items()}
-
-            lengths = list(x["length"] for x in lengths_info.values())
-            print("Lengths calculated", flush=True)
+            print("Gathering stats...")
+            lengths_info = cc_gather_stats(
+                volume, dask_array, spacing
+            )  # precompute the stats for all axons in parallel with dask
+            print("Stats gathered")
 
             with open(out_meta_file, "w") as length_data:
                 json.dump(lengths_info, length_data, indent=2)
+
+            lengths = [info["length"] for info in lengths_info.values()]
 
             kde = sns.kdeplot(lengths, label="KDE", color="C0")
             plt.xlabel("Length")
@@ -153,6 +130,22 @@ def draw_charts(to_predict_dir, assembled_dir):
             raise e
 
 
+def load_prediction_to_volume(patch_path, out, info, y, x):
+    prediction = nib.load(patch_path).get_fdata() > 0
+    prediction[prediction > 0] = 0xFF
+    prediction = prediction.transpose([2, 1, 0])
+    # now Z Y X
+    prediction = prediction[:, info["pad"] : -info["pad"], info["pad"] : -info["pad"]]
+    print("loaded patch", patch_path, "with unpadded shape", prediction.shape)
+    print("Patch nonzero count", np.count_nonzero(prediction))
+    print("Patch mean value", np.mean(prediction))
+    out[
+        :,
+        y * info["slide"] : (y + 1) * info["slide"],
+        x * info["slide"] : (x + 1) * info["slide"],
+    ] = prediction
+
+
 def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
     to_merge = filter(
         lambda x: re.match(r".*\.tiff?$", x.lower()), os.listdir(to_predict_dir)
@@ -174,53 +167,55 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
                 if not info.get("transposed", False)
                 else info["shape"][1]
             )
-            out = np.zeros((first_axis, info["shape"][2], info["shape"][3]), bool)
+            out = np.zeros((first_axis, info["shape"][2], info["shape"][3]), np.uint8)
         else:
-            out = np.zeros(info["shape"], bool)
+            out = np.zeros(info["shape"], np.uint8)
 
-        for y in range(info["ny"]):
-            for x in range(info["nx"]):
-                patch = file + f".part_{x}_{y}_0000.nii.gz"
-                # patch = re.sub(r"\.tiff?$", "", file, flags=re.IGNORECASE)
-                # patch = f"{patch}_{x}_{y}.nii.gz"
-                prediction = (
-                    nib.load(os.path.join(predicted_dir, patch)).get_fdata() > 0
-                )
-                prediction = prediction.transpose([2, 1, 0])
-                # now Z Y X
-                prediction = prediction[
-                    :, info["pad"] : -info["pad"], info["pad"] : -info["pad"]
-                ]
-                print("loaded patch", patch, "with unpadded shape", prediction.shape)
-                print("Patch nonzero count", np.count_nonzero(prediction))
-                print("Patch mean value", np.mean(prediction))
-                out[
-                    :,
-                    y * info["slide"] : (y + 1) * info["slide"],
-                    x * info["slide"] : (x + 1) * info["slide"],
-                ] = prediction
+        def load_patch(args):
+            y, x = args
+            patch = file + f".part_{x}_{y}_0000.nii.gz"
+            load_prediction_to_volume(
+                os.path.join(predicted_dir, patch), out, info, y, x
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=26) as executor:
+            futures = []
+            for y in range(info["ny"]):
+                for x in range(info["nx"]):
+                    futures.append(executor.submit(load_patch, (y, x)))
+            concurrent.futures.wait(futures)
+
+        print("All patches merged for file", file, "with shape", out.shape)
+
+        transposed = info.get("transposed", False)
 
         out = np.flip(out, axis=(1, 2))
+
         if len(info["shape"]) == 4:
-            out_temp = out
-            tile_cnt = info["shape"][1]
-            if "transposed" in info and info["transposed"]:
-                tile_cnt = info["shape"][0]
-            out_temp = np.tile(out_temp[:, np.newaxis, ...], (1, tile_cnt, 1, 1))
-            if "transposed" in info and info["transposed"]:
-                out_temp = out_temp.transpose([1, 0, 2, 3])
+            tile_cnt = info["shape"][0] if transposed else info["shape"][1]
+
+            # Create broadcasted view (NO copy)
+            out_b = np.broadcast_to(
+                out[:, None, :, :],
+                (out.shape[0], tile_cnt, out.shape[1], out.shape[2]),
+            )
+
+            if transposed:
+                out_b = out_b.transpose(1, 0, 2, 3)
+
             tifffile.imwrite(
                 out_path.replace(".label_instances", ".label_raw"),
-                out_temp.astype(np.uint8),
+                out_b,
                 compression="deflate",
                 dtype=np.uint8,
                 imagej=True,
             )
-            del out_temp
+
+            del out_b
         else:
             tifffile.imwrite(
                 out_path.replace(".label_instances", ".label_raw"),
-                out.astype(np.uint8),
+                out,
                 compression="deflate",
                 dtype=np.uint8,
                 imagej=True,
@@ -229,28 +224,82 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
         print("Postprocessing instance (dusting and instance segmentation)")
         out = postprocess_instance(out)
 
-        # accomodate for additional channels if the input has them
+        if out.dtype != np.uint16 and out.dtype != np.uint8:
+            print("Warning: Postprocessed dtype is", out.dtype)
+            print(
+                "This should not happen and will increase memory consumption. Please report this issue."
+            )
+            out = out.astype(np.uint16)
+
         if len(info["shape"]) == 4:
-            tile_cnt = info["shape"][1]
-            if "transposed" in info and info["transposed"]:
-                tile_cnt = info["shape"][0]
-            out = np.tile(out[:, np.newaxis, ...], (1, tile_cnt, 1, 1))
-        out = out.astype(np.uint16)
+            tile_cnt = info["shape"][0] if transposed else info["shape"][1]
 
-        if "transposed" in info and info["transposed"]:
-            out = out.transpose([1, 0, 2, 3])
+            # Create broadcasted view (NO copy)
+            out_b = np.broadcast_to(
+                out[:, None, :, :],
+                (out.shape[0], tile_cnt, out.shape[1], out.shape[2]),
+            )
 
-        tifffile.imwrite(
-            out_path, out, compression="deflate", dtype=out.dtype, imagej=True
-        )
-        out = (out > 0).astype(np.uint8)
-        tifffile.imwrite(
-            out_path.replace(".label_instances", ".label_binary"),
-            out,
-            compression="deflate",
-            dtype=np.uint8,
-            imagej=True,
-        )
+            if transposed:
+                out_b = out_b.transpose(1, 0, 2, 3)
+
+            tifffile.imwrite(
+                out_path, out_b, compression="deflate", dtype=out.dtype, imagej=True
+            )
+
+            del out_b
+        else:
+            tifffile.imwrite(
+                out_path, out, compression="deflate", dtype=out.dtype, imagej=True
+            )
+
+        binary = np.empty_like(out, dtype=np.uint8)
+        np.greater(out, 0, out=binary)
+        del out
+        binary[binary > 0] = 0xFF
+
+        if len(info["shape"]) == 4:
+            tile_cnt = info["shape"][0] if transposed else info["shape"][1]
+
+            # Create broadcasted view (NO copy)
+            out_b = np.broadcast_to(
+                binary[:, None, :, :],
+                (binary.shape[0], tile_cnt, binary.shape[1], binary.shape[2]),
+            )
+
+            if transposed:
+                out_b = out_b.transpose(1, 0, 2, 3)
+
+            tifffile.imwrite(
+                out_path.replace(".label_instances", ".label_binary"),
+                out_b,
+                compression="deflate",
+                dtype=np.uint8,
+                imagej=True,
+            )
+
+        else:
+            tifffile.imwrite(
+                out_path.replace(".label_instances", ".label_binary"),
+                binary,
+                compression="deflate",
+                dtype=np.uint8,
+                imagej=True,
+            )
+
+
+def get_malformed_xml(tif):
+    try:
+        xml = tif.pages[0].tags["ImageDescription"].value
+        parser = etree.XMLParser(
+            recover=True
+        )  # recovers from some malformed constructs
+        root = etree.fromstring(xml.encode("utf-8"), parser=parser)
+        xml_fixed = etree.tostring(root, encoding="utf-8").decode("utf-8")
+        return xml_fixed
+    except Exception as e:
+        print("Error parsing XML:", e)
+        return ""
 
 
 def prepare_splits(to_predict_dir, split_files_dir):
@@ -268,7 +317,7 @@ def prepare_splits(to_predict_dir, split_files_dir):
                     file_info = json.load(inf)
                     expected_nx = file_info.get("nx")
                     expected_ny = file_info.get("ny")
-                
+
                 # Check if all expected splits exist
                 if expected_nx is not None and expected_ny is not None:
                     all_splits_exist = True
@@ -276,16 +325,21 @@ def prepare_splits(to_predict_dir, split_files_dir):
                         for x_idx in range(expected_nx):
                             split_file = file + f".part_{x_idx}_{y_idx}_0000.tif"
                             split_json = file + f".part_{x_idx}_{y_idx}_0000.json"
-                            if split_file not in existing_files or split_json not in existing_files:
+                            if (
+                                split_file not in existing_files
+                                or split_json not in existing_files
+                            ):
                                 all_splits_exist = False
                                 break
                         if not all_splits_exist:
                             break
-                    
+
                     if all_splits_exist:
-                        print(f"Skipping {file} - all splits and JSON files already exist")
+                        print(
+                            f"Skipping {file} - all splits and JSON files already exist"
+                        )
                         continue
-            
+
             # process the tif file
             print("Splitting", file, "detected as TIFF file")
             ymax = 0
@@ -299,6 +353,7 @@ def prepare_splits(to_predict_dir, split_files_dir):
                 else:
                     print("WARNING! Unknown TIFF format for file:", file)
                     print("Metadata WILL NOT be extracted correctly.")
+                    info = get_malformed_xml(tif)
 
                 zarr_store = tif.aszarr()
 
@@ -323,9 +378,19 @@ def prepare_splits(to_predict_dir, split_files_dir):
                         dask_array[:, -1].min(), dask_array[:, -1].max()
                     )
 
+                perc975 = max_val
                 if max_val > 255:
                     print(
-                        "Volume max > 255. Assuming 16-bit input, converting to 8-bit for nnUNet"
+                        "Volume max > 255. Assuming 16-bit input, converting to 8-bit for nnUNet (97.5 percentile will be used for scaling)"
+                    )
+                    perc975 = da.compute(da.percentile(dask_array, 97.5))
+                    print(
+                        "97.5 percentile value:",
+                        perc975,
+                        "min value:",
+                        min_val,
+                        "max value:",
+                        max_val,
                     )
 
                 print("Original shape:", dask_array.shape)
@@ -361,7 +426,8 @@ def prepare_splits(to_predict_dir, split_files_dir):
                         ].compute()
 
                         if max_val > 255:
-                            scale = 256.0 / (max_val - min_val + 1)
+                            # use 97.5 percentile for scaling to reduce the impact of outliers
+                            scale = 256.0 / (perc975 - min_val + 1)
                             crop = (crop - min_val) * scale + 0.5
                             crop = np.clip(crop, 0, 255).astype(np.uint8)
 
@@ -412,6 +478,9 @@ def prepare_splits(to_predict_dir, split_files_dir):
 
 def run_prediction_on_gpu(gpu_id, input_files, output_files, model_folder, n_parts):
     print(f"Starting prediction on GPU {gpu_id} with {len(input_files)} files")
+    if len(input_files) == 0:
+        print(f"No files to predict on GPU {gpu_id}, skipping")
+        return
 
     predictor = nnUNetPredictor(
         tile_step_size=0.5,

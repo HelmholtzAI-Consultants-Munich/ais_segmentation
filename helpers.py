@@ -7,8 +7,12 @@ import networkx as nx
 import nibabel as nib
 import numpy as np
 import tifffile
+import dask.array as da
 from PIL import Image
 from skan import Skeleton, summarize
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from skimage.morphology import skeletonize
 
 Image.MAX_IMAGE_PIXELS = 281309436 * 12
 
@@ -102,13 +106,94 @@ def get_skeleton_lengths(skeleton, spacing):
     )
 
 
-def remove_bordering_axons(volume, precomputed_ccl=False):
+def handle_skeleton(inst_id, cc_labels, stats, original_file_dask, spacing, result):
+    try:
+        zmin, zmax, ymin, ymax, xmin, xmax = stats["bounding_boxes"][inst_id]
+        Z, Y, X = cc_labels.shape
+
+        if 0 in (zmin, xmin, ymin):
+            return  # instance touches the image border
+        if zmax + 1 == Z or xmax + 1 == X or ymax + 1 == Y:
+            return  # instance touches the image border
+
+        inst_results = {
+            "volume": int(stats["voxel_counts"][inst_id]),
+        }
+
+        skeleton_inst = (
+            cc_labels[zmin : zmax + 1, ymin : ymax + 1, xmin : xmax + 1] == inst_id
+        )
+        skeleton_inst = skeletonize(skeleton_inst)
+
+        skeleton = Skeleton(skeleton_inst, spacing=spacing, keep_images=False)
+
+        lengths = skeleton.path_lengths()
+
+        i_longest = int(np.argmax(lengths))
+        L_longest = float(lengths[i_longest])
+
+        node_ids = skeleton.path_coordinates(i_longest).astype(np.int64)
+
+        node_ids = np.rint(node_ids).astype(np.int64)
+
+        if node_ids.size == 0:
+            return
+
+        node_ids += np.array([zmin, ymin, xmin], dtype=np.int64)
+        z, y, x = node_ids.T
+        profile = original_file_dask.vindex[z, y, x].compute()
+
+        inst_results["length"] = float(L_longest)
+        inst_results["profile"] = profile.tolist()
+
+        result[inst_id] = inst_results
+    except Exception as e:
+        print(f"Error processing instance {inst_id}: {e}")
+
+
+def cc_gather_stats(cc_labels, original_file_dask, spacing):
+    print("Labels max: ", cc_labels.max())
+    stats = cc3d.statistics(cc_labels, no_slice_conversion=True)
+
+    result = {}
+    n_tasks = len(stats["voxel_counts"])
+
+    with ThreadPoolExecutor() as executor:
+        futures = [
+            executor.submit(
+                handle_skeleton,
+                inst_id,
+                cc_labels,
+                stats,
+                original_file_dask,
+                spacing,
+                result,
+            )
+            for inst_id in range(1, n_tasks)
+        ]
+
+        # Progress bar updates as each thread finishes
+        for _ in tqdm(
+            as_completed(futures), total=n_tasks, desc="Processing skeletons"
+        ):
+            pass
+
+    # -> Results should be complete at this point
+
+    return result
+
+
+def remove_bordering_axons(volume, precomputed_ccl=False, chunk_size=10_000_000_000):
     print("Border removal - computing ccl")
     if not precomputed_ccl:
-        volume = cc3d.connected_components(volume, connectivity=26)
+        volume = cc3d.connected_components(
+            volume, connectivity=26, max_labels=0xFFFE, out_dtype=np.uint16
+        )
     else:
-        volume = volume
+        # volume = volume
+        pass
 
+    print("Gathering bordering labels")
     # Efficiently gather border labels using ravel (no unnecessary copies)
     border_labels = np.unique(
         np.concatenate(
@@ -122,25 +207,105 @@ def remove_bordering_axons(volume, precomputed_ccl=False):
             ]
         )
     )
-
+    print("Computing mask")
     # Create mask of where labels should be removed
-    mask = np.isin(volume, border_labels)
+    # mask = np.isin(volume, border_labels, kind="table")
 
-    # Set those to zero (or preserve binary structure)
-    return np.where(mask, 0, volume)
+    flat = volume.reshape(-1)
+
+    before = np.count_nonzero(volume)
+
+    for start in tqdm(range(0, volume.size, chunk_size), desc="Chunked border removal"):
+        end = min(start + chunk_size, flat.size)
+        chunk = flat[start:end]
+        mask = np.isin(chunk, border_labels, assume_unique=True)
+        flat[start:end] = np.where(mask, 0, chunk)
+
+    after = np.count_nonzero(volume)
+
+    print("Border removal complete. Voxels removed:", before - after)
+
+    return volume
+
+
+def counts_chunked_uint16(volume, max_label=None, chunk_size=10_000_000_000):
+    # max_label should be small (e.g. 2401). If None, we compute it (may scan once).
+    if max_label is None:
+        max_label = int(volume.max())
+
+    counts = np.zeros(max_label + 1, dtype=np.int64)
+
+    flat = volume.reshape(-1)
+    n = flat.size
+
+    for start in tqdm(range(0, n, chunk_size), desc="Chunked count computation"):
+        end = min(start + chunk_size, n)
+        chunk = flat[start:end]
+
+        counts += np.bincount(chunk, minlength=max_label + 1)
+
+    return counts
+
+
+def dust_and_relabel_compact(
+    volume: np.ndarray, threshold=1500, chunk_size=10_000_000_000
+):
+    max_label = int(volume.max())
+    print("Running fast-dust procedure, number of labels:", max_label)
+
+    counts = counts_chunked_uint16(volume, max_label=max_label, chunk_size=chunk_size)
+
+    to_remove = np.nonzero(counts[1:] < threshold)[0] + 1
+    print("Found ", len(to_remove), "labels to remove")
+
+    keep = counts >= threshold
+    keep[0] = True
+
+    flat = volume.reshape(-1)
+    n = flat.size
+
+    # pass 1: dust in-place
+    for start in tqdm(range(0, n, chunk_size), desc="Chunked dusting computation"):
+        end = min(start + chunk_size, n)
+        chunk = flat[start:end]
+        mask = ~keep[chunk]
+        if mask.any():
+            chunk[mask] = 0
+
+    print("fast-dust complete")
+
+    # build LUT for compact relabeling of remaining labels
+    present = keep.copy()
+    present[0] = False
+
+    lut = np.zeros(max_label + 1, dtype=volume.dtype)
+    if present.any():
+        lut[present] = np.arange(1, int(present.sum()) + 1, dtype=volume.dtype)
+
+    # pass 2: apply LUT in-place (chunked)
+    for start in tqdm(range(0, n, chunk_size), desc="Chunked relabeling computation"):
+        end = min(start + chunk_size, n)
+        chunk = flat[start:end]
+        flat[start:end] = lut[chunk]
+
+    return volume, lut
 
 
 def postprocess_instance(volume):
     # the smallest real example we have seen so far is around 2000 voxels big
-    labels_out = cc3d.connected_components(volume, binary_image=True, connectivity=26)
-    print("Number of labels before dusting:", np.amax(labels_out))
-    labels_out = cc3d.dust(
-        labels_out, precomputed_ccl=True, in_place=True, threshold=1500
+    volume = cc3d.connected_components(
+        volume,
+        binary_image=True,
+        connectivity=26,
+        max_labels=0xFFFE,
+        out_dtype=np.uint16,
     )
-    print("Number of labels before border removal:", np.amax(labels_out))
-    # labels_out = remove_bordering_axons(labels_out, precomputed_ccl=True)
-    # print("Number of labels after border removal:", len(np.unique(labels_out))-1)
-    return labels_out
+    print("Number of labels before dusting:", np.amax(volume))
+    volume, _ = dust_and_relabel_compact(volume, threshold=1500)
+    # volume = remove_bordering_axons(volume, precomputed_ccl=True)
+    # print("Number of labels after border removal:", len(np.unique(volume))-1)
+    # volume = relabel_compact(volume)
+    return volume
 
 
 def extract_value(line):
@@ -185,6 +350,12 @@ def find_scaling(info):
             elif "ScalingZ" in line:
                 scaling_z = extract_value(line)
         return {"y": scaling_y, "x": scaling_x, "z": scaling_z}
+
+    else:
+        print(
+            "WARNING! Unknown TIFF format for file. Assuming isotropic spacing of 1.0."
+        )
+        return {"y": 1.0, "x": 1.0, "z": 1.0}
 
 
 def load_tif_volume(path):
