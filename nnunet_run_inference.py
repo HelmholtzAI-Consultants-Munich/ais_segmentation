@@ -14,6 +14,7 @@ import seaborn as sns
 import tifffile
 import torch
 import zarr
+import lxml
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from skimage.morphology import skeletonize
 
@@ -291,11 +292,11 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
 def get_malformed_xml(tif):
     try:
         xml = tif.pages[0].tags["ImageDescription"].value
-        parser = etree.XMLParser(
+        parser = lxml.etree.XMLParser(
             recover=True
         )  # recovers from some malformed constructs
-        root = etree.fromstring(xml.encode("utf-8"), parser=parser)
-        xml_fixed = etree.tostring(root, encoding="utf-8").decode("utf-8")
+        root = lxml.etree.fromstring(xml.encode("utf-8"), parser=parser)
+        xml_fixed = lxml.etree.tostring(root, encoding="utf-8").decode("utf-8")
         return xml_fixed
     except Exception as e:
         print("Error parsing XML:", e)
