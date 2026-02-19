@@ -15,6 +15,7 @@ import tifffile
 import torch
 import zarr
 import lxml
+import lxml.etree
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from skimage.morphology import skeletonize
 
