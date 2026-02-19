@@ -357,14 +357,18 @@ def prepare_splits(to_predict_dir, split_files_dir):
                     print("Metadata WILL NOT be extracted correctly.")
                     info = get_malformed_xml(tif)
 
+
+                print("Converting tif to zarr")
                 zarr_store = tif.aszarr()
 
+                print("Opening zarr store")
                 z = zarr.open(zarr_store, mode="r")
 
                 shape = z.shape
+                print("Building dask array")
                 dask_array = da.from_zarr(z)
-
-                min_val, max_val = da.compute(dask_array.min(), dask_array.max())
+                print("Computing min and max values for scaling")
+                min_val, max_val = da.compute(dask_array.min(), dask_array.max(), scheduler="threads")
 
                 transposed = False
 
@@ -377,7 +381,7 @@ def prepare_splits(to_predict_dir, split_files_dir):
                         dask_array = dask_array.transpose([1, 0, 2, 3])
                         transposed = True
                     min_val, max_val = da.compute(
-                        dask_array[:, -1].min(), dask_array[:, -1].max()
+                        dask_array[:, -1].min(), dask_array[:, -1].max(), scheduler="threads"
                     )
 
                 perc975 = max_val
