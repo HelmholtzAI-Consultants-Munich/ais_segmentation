@@ -389,7 +389,7 @@ def prepare_splits(to_predict_dir, split_files_dir):
                     print(
                         "Volume max > 255. Assuming 16-bit input, converting to 8-bit for nnUNet (97.5 percentile will be used for scaling)"
                     )
-                    perc975 = da.compute(da.percentile(dask_array, 97.5))
+                    perc975 = da.quantile(dask_array, 0.975).compute()
                     print(
                         "97.5 percentile value:",
                         perc975,
