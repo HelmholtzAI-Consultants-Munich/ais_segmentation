@@ -5,6 +5,7 @@ import concurrent.futures
 import os
 import re
 import time
+import tqdm
 
 import dask.array as da
 import matplotlib.pyplot as plt
@@ -18,6 +19,7 @@ import lxml
 import lxml.etree
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from skimage.morphology import skeletonize
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from helpers import (
     find_scaling,
@@ -411,63 +413,75 @@ def prepare_splits(to_predict_dir, split_files_dir):
 
                 z_dim, y_dim, x_dim = dask_array.shape
 
-                for y_idx, y in enumerate(range(0, y_dim, slide)):
-                    for x_idx, x in enumerate(range(0, x_dim, slide)):
-                        new_path = file + f".part_{x_idx}_{y_idx}_0000.tif"
-                        json_path = file + f".part_{x_idx}_{y_idx}_0000.json"
-                        if new_path in existing_files:
-                            print(
-                                "Skipping existing split file",
-                                new_path,
-                            )
-                            continue
-
-                        x_start = x - pad
-                        x_end = x + pad + slide
-                        y_start = y - pad
-                        y_end = y + pad + slide
-
-                        x_start_array, y_start_array = max(x_start, 0), max(y_start, 0)
-                        x_end_array, y_end_array = min(x_end, x_dim), min(y_end, y_dim)
-
-                        crop = dask_array[
-                            :, y_start_array:y_end_array, x_start_array:x_end_array
-                        ].compute()
-
-                        if max_val > 255:
-                            # use 97.5 percentile for scaling to reduce the impact of outliers
-                            scale = 256.0 / (perc975 - min_val + 1)
-                            crop = (crop - min_val) * scale + 0.5
-                            crop = np.clip(crop, 0, 255).astype(np.uint8)
-
-                        x_pad_start = max(x_start_array - x_start, 0)
-                        y_pad_start = max(y_start_array - y_start, 0)
-
-                        x_pad_end = min(x_end - x_end_array, pad)
-                        y_pad_end = min(y_end - y_end_array, pad)
-
-                        if y_pad_end + y_pad_start + x_pad_start + x_pad_end > 0:
-                            crop = np.pad(
-                                crop,
-                                (
-                                    (0, 0),
-                                    (y_pad_start, y_pad_end),
-                                    (x_pad_start, x_pad_end),
-                                ),
-                                mode="constant",
-                            )
-
+                def load_and_save_slice(y_idx, y, x_idx, x):
+                    new_path = file + f".part_{x_idx}_{y_idx}_0000.tif"
+                    json_path = file + f".part_{x_idx}_{y_idx}_0000.json"
+                    if new_path in existing_files:
                         print(
-                            f"\tExtracted slice [:, {y_start_array}:{y_end_array}, {x_start_array}:{x_end_array}]"
+                            "Skipping existing split file",
+                            new_path,
                         )
-                        print("\tAdditional padding:")
-                        print(
-                            f"\t[:,{y_pad_start}:{y_pad_end}, {x_pad_start}:{x_pad_end}]"
-                        )
-                        save_tif_volume(crop, os.path.join(split_files_dir, new_path))
+                        continue
 
-                        with open(os.path.join(split_files_dir, json_path), "w") as inf:
-                            inf.write('{"spacing": [1,1,1]}')
+                    x_start = x - pad
+                    x_end = x + pad + slide
+                    y_start = y - pad
+                    y_end = y + pad + slide
+
+                    x_start_array, y_start_array = max(x_start, 0), max(y_start, 0)
+                    x_end_array, y_end_array = min(x_end, x_dim), min(y_end, y_dim)
+
+                    crop = dask_array[
+                        :, y_start_array:y_end_array, x_start_array:x_end_array
+                    ].compute()
+
+                    if max_val > 255:
+                        # use 97.5 percentile for scaling to reduce the impact of outliers
+                        scale = 256.0 / (perc975 - min_val + 1)
+                        crop = (crop - min_val) * scale + 0.5
+                        crop = np.clip(crop, 0, 255).astype(np.uint8)
+
+                    x_pad_start = max(x_start_array - x_start, 0)
+                    y_pad_start = max(y_start_array - y_start, 0)
+
+                    x_pad_end = min(x_end - x_end_array, pad)
+                    y_pad_end = min(y_end - y_end_array, pad)
+
+                    if y_pad_end + y_pad_start + x_pad_start + x_pad_end > 0:
+                        crop = np.pad(
+                            crop,
+                            (
+                                (0, 0),
+                                (y_pad_start, y_pad_end),
+                                (x_pad_start, x_pad_end),
+                            ),
+                            mode="constant",
+                        )
+
+                    print(
+                        f"\tExtracted slice [:, {y_start_array}:{y_end_array}, {x_start_array}:{x_end_array}]"
+                    )
+                    print("\tAdditional padding:")
+                    print(f"\t[:,{y_pad_start}:{y_pad_end}, {x_pad_start}:{x_pad_end}]")
+                    save_tif_volume(crop, os.path.join(split_files_dir, new_path))
+
+                    with open(os.path.join(split_files_dir, json_path), "w") as inf:
+                        inf.write('{"spacing": [1,1,1]}')
+
+                with ThreadPoolExecutor() as executor:
+                    futures = []
+                    for y_idx, y in enumerate(range(0, y_dim, slide)):
+                        for x_idx, x in enumerate(range(0, x_dim, slide)):
+                            futures.append(
+                                executor.submit(load_and_save_slice, y_idx, y, x_idx, x)
+                            )
+
+                    n = len(futures)
+
+                    for _ in tqdm(
+                        as_completed(futures), total=n, desc="Multithreaded slicing"
+                    ):
+                        pass
 
                 with open(os.path.join(to_predict_dir, file + ".json"), "w") as inf:
                     spacing = find_scaling(info)
