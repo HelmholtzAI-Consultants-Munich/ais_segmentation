@@ -4,6 +4,7 @@ from os.path import basename
 
 import cc3d
 import networkx as nx
+import dask
 import nibabel as nib
 import numpy as np
 import tifffile
@@ -234,32 +235,26 @@ UINT16_MAX_PLUS1 = 2**16  # 65536
 
 def stats_from_uint16_histogram(x: da.Array, percentile: float = 0.975):
     """
-    Compute min, percentile, max for uint16-valued dask array using a chunk-safe histogram.
-    Assumes values are in [0, 65535]. Returns Python ints.
-
-    This version avoids x.ravel()/reshape(-1) rechunking by computing per-block bincounts
-    and summing them into a global histogram.
+    Compute min, percentile, max for uint16-valued dask array using histogram.
+    Assumes values are in [0, 65535].
+    Returns Python ints.
     """
+    # Histogram counts for each integer value
+    counts, _edges = da.histogram(
+        x,
+        bins=UINT16_MAX_PLUS1,
+        range=(0, UINT16_MAX_PLUS1),
+    )
 
-    # Build per-block histograms (no global flatten/rechunk)
-    # Each block -> (65536,) bincount vector; then sum across blocks.
-    counts = x.map_blocks(
-        lambda b: np.bincount(b.ravel(), minlength=UINT16_MAX_PLUS1).astype(np.int64),
-        dtype=np.int64,
-        chunks=(UINT16_MAX_PLUS1,),
-        drop_axis=tuple(range(x.ndim)),
-        new_axis=0,
-    ).sum(axis=0)
-
-    print("Computing dask histogram for quantile computation")
+    # Pull counts to NumPy (size is fixed: 65536)
     with ProgressBar():
-        counts = counts.compute()  # fixed-size: 65536
+        counts = counts.compute()
 
     total = counts.sum()
     if total == 0:
         raise ValueError("Empty data (histogram total count is zero).")
 
-    # min/max from nonzero bins
+    # min/max from nonzero bins (fast)
     nz = np.flatnonzero(counts)
     min_value = int(nz[0])
     max_value = int(nz[-1])
