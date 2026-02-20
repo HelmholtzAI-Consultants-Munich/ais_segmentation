@@ -13,6 +13,7 @@ from skan import Skeleton, summarize
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from skimage.morphology import skeletonize
+from dask.diagnostics import ProgressBar
 
 Image.MAX_IMAGE_PIXELS = 281309436 * 12
 
@@ -226,6 +227,49 @@ def remove_bordering_axons(volume, precomputed_ccl=False, chunk_size=10_000_000_
     print("Border removal complete. Voxels removed:", before - after)
 
     return volume
+
+
+UINT16_MAX_PLUS1 = 2**16  # 65536
+
+
+def stats_from_uint16_histogram(x: da.Array, percentile: float = 0.975):
+    """
+    Compute min, percentile, max for uint16-valued dask array using a chunk-safe histogram.
+    Assumes values are in [0, 65535]. Returns Python ints.
+
+    This version avoids x.ravel()/reshape(-1) rechunking by computing per-block bincounts
+    and summing them into a global histogram.
+    """
+
+    # Build per-block histograms (no global flatten/rechunk)
+    # Each block -> (65536,) bincount vector; then sum across blocks.
+    counts = x.map_blocks(
+        lambda b: np.bincount(b.ravel(), minlength=UINT16_MAX_PLUS1).astype(np.int64),
+        dtype=np.int64,
+        chunks=(UINT16_MAX_PLUS1,),
+        drop_axis=tuple(range(x.ndim)),
+        new_axis=0,
+    ).sum(axis=0)
+
+    print("Computing dask histogram for quantile computation")
+    with ProgressBar():
+        counts = counts.compute()  # fixed-size: 65536
+
+    total = counts.sum()
+    if total == 0:
+        raise ValueError("Empty data (histogram total count is zero).")
+
+    # min/max from nonzero bins
+    nz = np.flatnonzero(counts)
+    min_value = int(nz[0])
+    max_value = int(nz[-1])
+
+    # percentile from CDF
+    cdf = np.cumsum(counts)
+    rank = percentile * (total - 1)
+    p_value = int(np.searchsorted(cdf, rank, side="left"))
+
+    return min_value, p_value, max_value
 
 
 def counts_chunked_uint16(volume, max_label=None, chunk_size=10_000_000_000):

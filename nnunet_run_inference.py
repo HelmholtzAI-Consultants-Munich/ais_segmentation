@@ -20,6 +20,7 @@ import lxml.etree
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from skimage.morphology import skeletonize
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dask.diagnostics import ProgressBar
 
 from helpers import (
     find_scaling,
@@ -32,6 +33,7 @@ from helpers import (
     slide,
     counts_chunked_uint16,
     cc_gather_stats,
+    stats_from_uint16_histogram,
 )
 
 
@@ -368,10 +370,6 @@ def prepare_splits(to_predict_dir, split_files_dir):
                 shape = z.shape
                 print("Building dask array")
                 dask_array = da.from_zarr(z)
-                print("Computing min and max values for scaling")
-                min_val, max_val = da.compute(
-                    dask_array.min(), dask_array.max(), scheduler="threads"
-                )
 
                 transposed = False
 
@@ -383,35 +381,33 @@ def prepare_splits(to_predict_dir, split_files_dir):
                         )
                         dask_array = dask_array.transpose([1, 0, 2, 3])
                         transposed = True
-                    min_val, max_val = da.compute(
-                        dask_array[:, -1].min(),
-                        dask_array[:, -1].max(),
-                        scheduler="threads",
-                    )
-
-                perc975 = max_val
-                if max_val > 255:
-                    print(
-                        "Volume max > 255. Assuming 16-bit input, converting to 8-bit for nnUNet (97.5 percentile will be used for scaling)"
-                    )
-                    perc975 = da.quantile(dask_array, 0.975).compute()
-                    print(
-                        "97.5 percentile value:",
-                        perc975,
-                        "min value:",
-                        min_val,
-                        "max value:",
-                        max_val,
-                    )
 
                 print("Original shape:", dask_array.shape)
                 if len(z.shape) == 4:
                     dask_array = dask_array[:, -1, ...]
                 print("Shape after removing channels:", dask_array.shape)
 
+                print("Computing min and max values for scaling")
+                min_val, perc975, max_val = stats_from_uint16_histogram(dask_array)
+                print("Quantiles computed")
+                print(
+                    "97.5 percentile value:",
+                    perc975,
+                    "min value:",
+                    min_val,
+                    "max value:",
+                    max_val,
+                )
+
+                if max_val > 255:
+                    print(
+                        "Volume max > 255. Assuming 16-bit input, converting to 8-bit for nnUNet (97.5 percentile will be used for scaling)"
+                    )
+
                 dask_array = da.flip(dask_array, axis=(1, 2))
 
                 z_dim, y_dim, x_dim = dask_array.shape
+                print("Volume dimensions (Z Y X):", z_dim, y_dim, x_dim)
 
                 def load_and_save_slice(y_idx, y, x_idx, x):
                     new_path = file + f".part_{x_idx}_{y_idx}_0000.tif"
@@ -468,6 +464,7 @@ def prepare_splits(to_predict_dir, split_files_dir):
                     with open(os.path.join(split_files_dir, json_path), "w") as inf:
                         inf.write('{"spacing": [1,1,1]}')
 
+                print("Starting multithreaded slicing and saving of patches")
                 with ThreadPoolExecutor() as executor:
                     futures = []
                     for y_idx, y in enumerate(range(0, y_dim, slide)):
