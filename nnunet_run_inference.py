@@ -421,7 +421,7 @@ def prepare_splits(to_predict_dir, split_files_dir):
                             "Skipping existing split file",
                             new_path,
                         )
-                        continue
+                        return
 
                     x_start = x - pad
                     x_end = x + pad + slide
