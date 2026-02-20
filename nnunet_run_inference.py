@@ -5,7 +5,6 @@ import concurrent.futures
 import os
 import re
 import time
-import tqdm
 
 import dask.array as da
 import matplotlib.pyplot as plt
@@ -21,6 +20,7 @@ from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from skimage.morphology import skeletonize
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dask.diagnostics import ProgressBar
+from tqdm import tqdm
 
 from helpers import (
     find_scaling,
