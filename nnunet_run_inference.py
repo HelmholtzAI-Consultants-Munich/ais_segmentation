@@ -404,6 +404,10 @@ def prepare_splits(to_predict_dir, split_files_dir):
                         "Volume max > 255. Assuming 16-bit input, converting to 8-bit for nnUNet (97.5 percentile will be used for scaling)"
                     )
 
+                    if perc975 < 255:
+                        perc975 = 255
+                        print("97.5 percentile is below 255, using 255 for scaling")
+
                 dask_array = da.flip(dask_array, axis=(1, 2))
 
                 z_dim, y_dim, x_dim = dask_array.shape
@@ -465,7 +469,7 @@ def prepare_splits(to_predict_dir, split_files_dir):
                         inf.write('{"spacing": [1,1,1]}')
 
                 print("Starting multithreaded slicing and saving of patches")
-                with ThreadPoolExecutor() as executor:
+                with ThreadPoolExecutor(max_workers=8) as executor:
                     futures = []
                     for y_idx, y in enumerate(range(0, y_dim, slide)):
                         for x_idx, x in enumerate(range(0, x_dim, slide)):
