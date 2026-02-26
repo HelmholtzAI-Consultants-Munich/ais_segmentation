@@ -15,6 +15,8 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from skimage.morphology import skeletonize
 from dask.diagnostics import ProgressBar
+from scipy.ndimage import label
+from scipy.cluster.hierarchy import DisjointSet
 
 Image.MAX_IMAGE_PIXELS = 281309436 * 12
 
@@ -286,6 +288,26 @@ def counts_chunked_uint16(volume, max_label=None, chunk_size=10_000_000_000):
     return counts
 
 
+def relabel_compact(volume, counts, chunk_size=10_000_000_000):
+    # Build LUT for compact relabeling of remaining labels
+    present = counts > 0
+    present[0] = False  # background should stay 0
+
+    lut = np.zeros(len(counts), dtype=volume.dtype)
+    if present.any():
+        lut[present] = np.arange(1, int(present.sum()) + 1, dtype=volume.dtype)
+
+    flat = volume.reshape(-1)
+    n = flat.size
+
+    for start in tqdm(range(0, n, chunk_size), desc="Chunked relabeling computation"):
+        end = min(start + chunk_size, n)
+        chunk = flat[start:end]
+        flat[start:end] = lut[chunk]
+
+    return volume
+
+
 def dust_and_relabel_compact(
     volume: np.ndarray, threshold=1500, chunk_size=10_000_000_000
 ):
@@ -330,21 +352,172 @@ def dust_and_relabel_compact(
     return volume, lut
 
 
+def label_chunked(
+    volume, connectivity=26, out_dtype=np.uint16, chunk_size=(3000, 3000)
+):
+    zs, ys, xs = volume.shape
+
+    max_id = 0
+
+    elements = DisjointSet()
+
+    with tqdm(
+        total=(xs // chunk_size[1] + 1) * (ys // chunk_size[0] + 1),
+        desc="Chunked labeling label pass",
+    ) as pbar:
+        for y_start in range(0, ys, chunk_size[0]):
+            for x_start in range(0, xs, chunk_size[1]):
+                y_end = min(y_start + chunk_size[0], ys)
+                x_end = min(x_start + chunk_size[1], xs)
+
+                chunk = volume[:, y_start:y_end, x_start:x_end]
+
+                labeled_chunk = cc3d.connected_components(
+                    chunk,
+                    connectivity=connectivity,
+                    max_labels=0xFFFF,
+                    out_dtype=out_dtype,
+                )
+
+                labeled_chunk[labeled_chunk > 0] += max_id
+
+                for index in range(max_id + 1, labeled_chunk.max() + 1):
+                    elements.add(index)
+
+                max_id = labeled_chunk.max()
+
+                volume[:, y_start:y_end, x_start:x_end] = labeled_chunk
+
+                if y_start > 0:
+                    # A: previous row at y_start-1, B: current row at y_start
+                    A = volume[:, y_start - 1, x_start:x_end]  # (zs, w)
+                    B = volume[:, y_start, x_start:x_end]  # (zs, w)
+
+                    pairs_all = []
+                    for dz in (-1, 0, 1):
+                        zA = slice(max(0, -dz), min(zs, zs - dz))
+                        zB = slice(max(0, dz), min(zs, zs + dz))
+                        # 1:zs vs 0:zs-1
+                        # 0:zs vs 0:zs
+                        # 0:zs-1 vs 1:zs
+                        for dx in (-1, 0, 1):
+                            xA = slice(max(0, -dx), min(A.shape[1], A.shape[1] - dx))
+                            xB = slice(max(0, dx), min(B.shape[1], B.shape[1] + dx))
+
+                            AA = A[zA, xA]
+                            BB = B[zB, xB]
+                            m = (AA > 0) & (BB > 0)
+                            if m.any():
+                                pairs_all.append(np.stack([AA[m], BB[m]], axis=1))
+
+                    if pairs_all:
+                        pairs = np.unique(np.concatenate(pairs_all, axis=0), axis=0)
+                        for a, b in pairs:
+                            elements.merge(int(a), int(b))
+
+                if x_start > 0:
+                    # seam between x_start-1 (prev) and x_start (this)
+                    A = volume[:, y_start:y_end, x_start - 1]  # (zs, h)
+                    B = volume[:, y_start:y_end, x_start]  # (zs, h)
+
+                    pairs_all = []
+                    h = A.shape[1]
+
+                    for dz in (-1, 0, 1):
+                        zA = slice(max(0, -dz), min(zs, zs - dz))
+                        zB = slice(max(0, dz), min(zs, zs + dz))
+
+                        for dy in (-1, 0, 1):
+                            yA = slice(max(0, -dy), min(h, h - dy))
+                            yB = slice(max(0, dy), min(h, h + dy))
+
+                            AA = A[zA, yA]
+                            BB = B[zB, yB]
+                            m = (AA > 0) & (BB > 0)
+                            if m.any():
+                                pairs_all.append(np.stack([AA[m], BB[m]], axis=1))
+
+                    if pairs_all:
+                        pairs = np.unique(np.concatenate(pairs_all, axis=0), axis=0)
+                        for a, b in pairs:
+                            elements.merge(int(a), int(b))
+
+                pbar.update(1)
+
+    lut = np.zeros(max_id + 1, dtype=out_dtype)
+    for i in range(1, max_id + 1):
+        root = elements[i]
+        if root != 0:
+            lut[i] = root
+
+    with tqdm(
+        total=(xs // chunk_size[1] + 1) * (ys // chunk_size[0] + 1),
+        desc="Chunked labeling lut pass",
+    ) as pbar:
+        for y_start in range(0, ys, chunk_size[0]):
+            for x_start in range(0, xs, chunk_size[1]):
+                y_end = min(y_start + chunk_size[0], ys)
+                x_end = min(x_start + chunk_size[1], xs)
+
+                chunk = volume[:, y_start:y_end, x_start:x_end]
+                chunk = lut[chunk]
+                volume[:, y_start:y_end, x_start:x_end] = chunk
+
+                pbar.update(1)
+
+    return volume
+
+
 def postprocess_instance(volume):
+    # volume = chunked_predusting(volume, threshold=1500)
     # the smallest real example we have seen so far is around 2000 voxels big
-    volume = cc3d.connected_components(
-        volume,
-        binary_image=True,
-        connectivity=26,
-        max_labels=0xFFFE,
-        out_dtype=np.uint16,
-    )
+    volume = label_chunked(volume)
+
     print("Number of labels before dusting:", np.amax(volume))
     volume, _ = dust_and_relabel_compact(volume, threshold=1500)
     # volume = remove_bordering_axons(volume, precomputed_ccl=True)
     # print("Number of labels after border removal:", len(np.unique(volume))-1)
     # volume = relabel_compact(volume)
     return volume
+
+
+# def postprocess_instance(volume_dask: np.ndarray, *, threshold: int = 1500) -> np.ndarray:
+#     """
+#     Chunked Dask version:
+#     - Wrap numpy array as dask array (zero-copy)
+#     - Chunked connected components labeling (26-connectivity equivalent via full neighborhood)
+#     - Remove components with voxel count < threshold
+#     - Relabel compact to uint16
+#     - Materialize as a uint16 numpy array and return
+#     - If #components > 0xFFFE, raise ValueError
+#     """
+#     if volume_dask.ndim != 3:
+#         raise ValueError(f"Expected 3D input, got shape {volume_dask.shape}")
+
+#     # 2) Label (chunked, with stitching across chunk borders)
+#     structure = np.ones((3, 3, 3), dtype=bool)  # 26-connectivity
+#     print("Dask labelling - this may take a while...")
+#     labels, n = da_label(volume_dask, structure=structure)
+
+#     # 3) Count voxels per label (counts array is small because n_val <= 65534)
+#     print("Computing counts for dusting - this may take a while...")
+#     counts = da.bincount(labels.ravel(), minlength=n)
+#     counts = counts.compute()
+#     removed_indices = np.argwhere(counts < threshold)
+#     counts[removed_indices] = 0
+
+#     # Remove small components by setting them to background (0)
+#     filtered = da.where(da.isin(labels, removed_indices), 0, labels)
+
+#     filtered = filtered.astype(np.uint16)  # safe because we will relabel compactly to <= 65535 labels
+
+#     out = filtered.compute()  # trigger computation of the filtered labels before relabeling
+
+#     counts = counts.compute()
+
+#     out = relabel_compact(out, counts=counts)
+
+#     return out
 
 
 def extract_value(line):

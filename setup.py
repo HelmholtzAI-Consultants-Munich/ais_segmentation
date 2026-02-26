@@ -21,6 +21,7 @@ setup(
         "zarr",
         "dask",
         "lxml",
+        "dask_image",
     ],
     entry_points={
         "console_scripts": [

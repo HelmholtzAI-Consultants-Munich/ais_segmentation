@@ -167,68 +167,86 @@ def merge_predictions(to_predict_dir, predicted_dir, assembled_dir):
         file_info = file + ".json"
         with open(os.path.join(to_predict_dir, file_info), "r") as finfo:
             info = json.load(finfo)
-        if len(info["shape"]) == 4:
-            first_axis = (
-                info["shape"][0]
-                if not info.get("transposed", False)
-                else info["shape"][1]
-            )
-            out = np.zeros((first_axis, info["shape"][2], info["shape"][3]), np.uint8)
+
+        raw_path = out_path.replace(".label_instances", ".label_raw")
+
+        if os.path.exists(raw_path):
+            print("Raw file already exists for", file, "skipping merging")
+            out = tifffile.TiffFile(raw_path).asarray()
+
+            if len(info["shape"]) == 4:
+                if transposed:
+                    out = out.transpose(1, 0, 2, 3)
+                out = out[:, -1, ...]
         else:
-            out = np.zeros(info["shape"], np.uint8)
+            if len(info["shape"]) == 4:
+                first_axis = (
+                    info["shape"][0]
+                    if not info.get("transposed", False)
+                    else info["shape"][1]
+                )
+                out = np.zeros(
+                    (first_axis, info["shape"][2], info["shape"][3]), np.uint8
+                )
+            else:
+                out = np.zeros(info["shape"], np.uint8)
 
-        def load_patch(args):
-            y, x = args
-            patch = file + f".part_{x}_{y}_0000.nii.gz"
-            load_prediction_to_volume(
-                os.path.join(predicted_dir, patch), out, info, y, x
-            )
+            def load_patch(args):
+                y, x = args
+                patch = file + f".part_{x}_{y}_0000.nii.gz"
+                load_prediction_to_volume(
+                    os.path.join(predicted_dir, patch), out, info, y, x
+                )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=26) as executor:
-            futures = []
-            for y in range(info["ny"]):
-                for x in range(info["nx"]):
-                    futures.append(executor.submit(load_patch, (y, x)))
-            concurrent.futures.wait(futures)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=26) as executor:
+                futures = []
+                for y in range(info["ny"]):
+                    for x in range(info["nx"]):
+                        futures.append(executor.submit(load_patch, (y, x)))
+                concurrent.futures.wait(futures)
 
-        print("All patches merged for file", file, "with shape", out.shape)
+            print("All patches merged for file", file, "with shape", out.shape)
 
-        transposed = info.get("transposed", False)
+            transposed = info.get("transposed", False)
 
-        out = np.flip(out, axis=(1, 2))
+            out = np.flip(out, axis=(1, 2))
 
-        if len(info["shape"]) == 4:
-            tile_cnt = info["shape"][0] if transposed else info["shape"][1]
+            if len(info["shape"]) == 4:
+                tile_cnt = info["shape"][0] if transposed else info["shape"][1]
 
-            # Create broadcasted view (NO copy)
-            out_b = np.broadcast_to(
-                out[:, None, :, :],
-                (out.shape[0], tile_cnt, out.shape[1], out.shape[2]),
-            )
+                # Create broadcasted view (NO copy)
+                out_b = np.broadcast_to(
+                    out[:, None, :, :],
+                    (out.shape[0], tile_cnt, out.shape[1], out.shape[2]),
+                )
 
-            if transposed:
-                out_b = out_b.transpose(1, 0, 2, 3)
+                if transposed:
+                    out_b = out_b.transpose(1, 0, 2, 3)
 
-            tifffile.imwrite(
-                out_path.replace(".label_instances", ".label_raw"),
-                out_b,
-                compression="deflate",
-                dtype=np.uint8,
-                imagej=True,
-            )
+                tifffile.imwrite(
+                    out_path.replace(".label_instances", ".label_raw"),
+                    out_b,
+                    compression="deflate",
+                    dtype=np.uint8,
+                    imagej=True,
+                )
 
-            del out_b
-        else:
-            tifffile.imwrite(
-                out_path.replace(".label_instances", ".label_raw"),
-                out,
-                compression="deflate",
-                dtype=np.uint8,
-                imagej=True,
-            )
+                del out_b
+            else:
+                tifffile.imwrite(
+                    out_path.replace(".label_instances", ".label_raw"),
+                    out,
+                    compression="deflate",
+                    dtype=np.uint8,
+                    imagej=True,
+                )
 
-        print("Postprocessing instance (dusting and instance segmentation)")
-        out = postprocess_instance(out)
+        try:
+            out = out.astype(np.uint16)
+            out = postprocess_instance(out)
+        except Exception as e:
+            print(e)
+            print("Error during postprocessing, skipping", file)
 
         if out.dtype != np.uint16 and out.dtype != np.uint8:
             print("Warning: Postprocessed dtype is", out.dtype)
