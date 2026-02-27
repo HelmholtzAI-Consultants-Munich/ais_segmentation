@@ -379,12 +379,18 @@ def label_chunked(
                     out_dtype=out_dtype,
                 )
 
-                labeled_chunk[labeled_chunk > 0] += max_id
+                chunk_max = int(labeled_chunk.max())
+                if chunk_max > 0:
+                    labeled_chunk[labeled_chunk > 0] += max_id
+                    new_max = max_id + chunk_max
 
-                for index in range(max_id + 1, labeled_chunk.max() + 1):
-                    elements.add(index)
+                    for index in range(max_id + 1, new_max + 1):
+                        elements.add(index)
 
-                max_id = labeled_chunk.max()
+                    max_id = new_max
+                else:
+                    # leave max_id unchanged
+                    pass
 
                 volume[:, y_start:y_end, x_start:x_end] = labeled_chunk
 
